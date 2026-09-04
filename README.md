@@ -1,0 +1,21 @@
+# agent-loop
+
+从 SwiftAgent 拆出的独立 ReAct loop（jsonl 对账、工具 hook、崩溃恢复、LLM 重试）。
+
+SwiftAgent 仓库里的代码没有改。这里只换了包名，并加了一个本地 CLI。
+
+## 跑起来
+
+入口：`agent_loop/__main__.py`
+
+```bash
+cd /Users/wangyin/agent_loop
+source .venv/bin/activate
+PYTHONPATH=. python -m agent_loop -s wy1 "随便写一段 python 并运行一下"
+```
+
+`-s / --session` 指定会话，日志在 `.agent/sessions/<id>.jsonl`。不传则每次新建 `cli-时间戳`。
+
+## 布局
+
+和原来 `swiftagent/agent_loop` 相同。入口是 `python -m agent_loop`，内部调 `_run_loop`，不经过 SA 的 Post/SSE。

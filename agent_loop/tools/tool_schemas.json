@@ -1,0 +1,19 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "bash",
+      "description": "在 E2B 沙箱中执行一条 bash 命令，返回 stdout/stderr。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "type": "string",
+            "description": "要执行的 bash 命令"
+          }
+        },
+        "required": ["cmd"]
+      }
+    }
+  }
+]

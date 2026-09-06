@@ -101,6 +101,7 @@ class ReactAgentLoop(AgentLoop):
     async def _run_loop(self, user_query: str, user_action_data: Dict[str, Any]) -> str:
         self._log = SessionLog(session_log_path(user_action_data))
         self.runtime.attach_log(self._log)
+        self.runtime.workspace = str(user_action_data.get("workspace") or os.getcwd())
         plan = inspect_log(self._log.read_all())
         if plan.action not in ("idle", "empty"):
             logging.info("[recover] action=%s unfinished=%s", plan.action, len(plan.unfinished))

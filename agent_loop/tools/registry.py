@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from agent_loop.tools import bash_tool
+from agent_loop.tools import bash_tool, read_tool, write_tool
 
 TOOLS = {
     bash_tool.NAME: bash_tool,
+    read_tool.NAME: read_tool,
+    write_tool.NAME: write_tool,
 }
 
 

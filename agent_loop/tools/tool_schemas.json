@@ -3,16 +3,62 @@
     "type": "function",
     "function": {
       "name": "bash",
-      "description": "在 E2B 沙箱中执行一条 bash 命令，返回 stdout/stderr。",
+      "description": "Run a shell command in the local working directory. Use for git, tests, installs, and one-off scripts. Do not use it to cat/sed/read/write source files — use the read and write tools instead.",
       "parameters": {
         "type": "object",
         "properties": {
           "cmd": {
             "type": "string",
-            "description": "要执行的 bash 命令"
+            "description": "The bash command to run"
           }
         },
         "required": ["cmd"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read",
+      "description": "Read a text file. Returns numbered lines. Use offset (1-based) and limit for large files; if truncated, continue with the next offset. Do not use bash cat/sed/head for this.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path relative to the workspace, or an absolute path (absolute is used as-is)"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "1-based line number to start reading"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of lines to return"
+          }
+        },
+        "required": ["path"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "write",
+      "description": "Create or overwrite a whole text file. Use for new files or full-file rewrites. Do not use bash cat/heredoc for this. For a small patch, prefer a later edit (old must be unique). Path is relative to the workspace, or an absolute path (absolute is used as-is). content is the full file text; empty string is allowed.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path relative to the workspace, or an absolute path (absolute is used as-is)"
+          },
+          "content": {
+            "type": "string",
+            "description": "Full file text to write. Empty string creates an empty file."
+          }
+        },
+        "required": ["path", "content"]
       }
     }
   }

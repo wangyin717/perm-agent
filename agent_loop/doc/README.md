@@ -211,12 +211,12 @@ asyncio.wait_for(
 
 建议顺序（对齐 pi / Grok Build 的 coding 底座）：
 
-1. **read** — 读文件（offset/limit），`REPLAY=safe`
-2. **write** — 整文件写，`REPLAY=never`
+1. **read** — **已做。** `path` + 可选 `offset`/`limit`，行号输出，`REPLAY=safe`；相对路径拼 workspace，绝对路径原样；after 截断
+2. **write** — **已做。** 整文件写（`path` + `content`），`REPLAY=never`；路径规则同 read；缺目录会 mkdir
 3. **edit** — 改一段（old/new 唯一匹配），`REPLAY=never`
-4. **grep** — 仓库内搜内容，`REPLAY=safe`（比 bash rg 好截断、好对账）
+4. **grep** — 仓库内搜内容，`REPLAY=safe`
 
-有 **bash + 这四件** 就够当最小 coding agent。`list_dir` 可随后加（bash ls 能凑合）。todo / subagent / web / 图视频都后放。
+有 **bash + read + write + edit + grep** 就够当最小 coding agent。
 
 ---
 

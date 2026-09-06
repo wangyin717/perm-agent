@@ -9,6 +9,7 @@ import os
 from datetime import datetime
 
 from agent_loop.agent_loop import ReactAgentLoop
+from agent_loop.trace import log_session
 
 
 class CliDeps:
@@ -22,7 +23,7 @@ async def _amain(query: str, session_id: str) -> str:
         "sessionId": session_id,
         "workspace": os.getcwd(),
     }
-    logging.info("[session] %s  ->  .agent/sessions/%s.jsonl", session_id, session_id)
+    log_session(session_id, f".agent/sessions/{session_id}.jsonl")
     return await loop._run_loop(query, user_action_data)
 
 

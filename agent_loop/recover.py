@@ -189,7 +189,9 @@ async def _replay_one(runtime: ToolRuntime, item: UnfinishedTool, sandbox=None) 
         return
     logging.info("[recover] replay tool=%s result_id=%s", item.tool_name, item.result_id)
     try:
-        content = await tool.execute(item.effective_args, sandbox)
+        content = await tool.execute(
+            item.effective_args, sandbox, workspace=getattr(runtime, "workspace", None)
+        )
         is_error = False
     except Exception as exc:
         logging.exception("[recover] replay execute 失败 tool=%s", item.tool_name)

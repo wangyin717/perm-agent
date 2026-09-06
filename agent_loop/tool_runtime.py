@@ -15,7 +15,7 @@ from agent_loop.tools.records import (
     new_result_id,
 )
 from agent_loop.tools.registry import available_tool_names, get_tool
-from agent_loop.trace import format_args, log_tool_result
+from agent_loop.trace import log_tool_result
 
 
 class ToolRuntime:
@@ -24,6 +24,7 @@ class ToolRuntime:
         self.tool_started_records: List[ToolStartedRecord] = []
         self.tool_result_records: List[ToolResultEntry] = []
         self._log: Optional[SessionLog] = None
+        self.workspace: Optional[str] = None
 
     def attach_log(self, log: Optional[SessionLog]) -> None:
         self._log = log
@@ -58,9 +59,10 @@ class ToolRuntime:
         started = self.record_tool_started(
             call_id, name, decision.args, _tool_replay(tool)
         )
-        logging.info("[tool] %s args %s", name, format_args(started.effective_args))
         try:
-            content = await tool.execute(started.effective_args, sandbox)
+            content = await tool.execute(
+                started.effective_args, sandbox, workspace=self.workspace
+            )
             is_error = False
         except Exception as exc:
             logging.warning("[tool] %s failed: %s", name, exc)

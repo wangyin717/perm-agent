@@ -213,8 +213,8 @@ asyncio.wait_for(
 
 1. **read** — **已做。** `path` + 可选 `offset`/`limit`，行号输出，`REPLAY=safe`；相对路径拼 workspace，绝对路径原样；after 截断
 2. **write** — **已做。** 整文件写（`path` + `content`），`REPLAY=never`；路径规则同 read；缺目录会 mkdir
-3. **edit** — 改一段（old/new 唯一匹配），`REPLAY=never`
-4. **grep** — 仓库内搜内容，`REPLAY=safe`
+3. **edit** — **已做。** 精确替换（`path` / `old` / `new`，可选 `replace_all`），`old` 必须唯一除非 `replace_all`；`REPLAY=never`；空 old 在 before_tool 拦住
+4. **grep** — **已做。** 正则搜内容（`pattern`，可选 `path` / `glob`），`path:line:content`，最多 50 条并带总数 footer；`REPLAY=safe`；有 rg 用 rg，否则 Python 走目录
 
 有 **bash + read + write + edit + grep** 就够当最小 coding agent。
 
@@ -230,6 +230,7 @@ tool_runtime.py    call_tool / started / result
 session_log.py     jsonl
 recover.py         inspect_log + apply_recovery + 投影 messages
 tools/bash_tool.py 执行、REPLAY、hooks、超时重试
+tools/read_tool.py / write_tool.py / edit_tool.py / grep_tool.py
 tools/records.py   StepAttemptRecord / ToolStartedRecord / ToolResultEntry
 tools/registry.py  TOOLS
 tools/hooks.py     before/after 分发

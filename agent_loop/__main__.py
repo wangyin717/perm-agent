@@ -38,7 +38,7 @@ def main() -> None:
     parser.add_argument("query", nargs="*", help="用户问题")
     args = parser.parse_args()
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.WARNING,
         format="%(asctime)s  %(message)s",
         datefmt="%H:%M:%S",
     )
@@ -49,9 +49,7 @@ def main() -> None:
         parser.print_help()
         raise SystemExit(1)
     session_id = args.session or datetime.now().strftime("cli-%Y%m%d-%H%M%S")
-    answer = asyncio.run(_amain(query, session_id))
-    print()
-    print(answer or "")
+    asyncio.run(_amain(query, session_id))
 
 
 if __name__ == "__main__":

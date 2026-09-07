@@ -14,7 +14,30 @@ source .venv/bin/activate
 PYTHONPATH=. python -m agent_loop -s wy1 "随便写一段 python 并运行一下"
 ```
 
-`-s / --session` 指定会话，日志在 `.agent/sessions/<id>.jsonl`。不传则每次新建 `cli-时间戳`。
+`-s / --session` 指定会话，机器日志在 `.agent/sessions/<id>.jsonl`。不传则每次新建 `cli-时间戳`。
+
+终端过程按对话分段打印：
+
+```text
+## User
+
+随便写一段 python 并运行一下
+
+## Assistant
+
+先看目录，再写文件。
+
+## Tools
+
+- Grep: def main (*.py)
+- Read: hello.py (1-40)
+- Edit: hello.py
+- Bash: python hello.py
+
+## Assistant
+
+已经写好并跑通。
+```
 
 ## 布局
 

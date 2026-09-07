@@ -3,7 +3,7 @@
     "type": "function",
     "function": {
       "name": "bash",
-      "description": "Run a shell command in the local working directory. Use for git, tests, installs, and one-off scripts. Do not use it to cat/sed/read/write source files — use the read and write tools instead.",
+      "description": "Run a shell command in the local working directory. Use for git, tests, installs, and one-off scripts. Do not use it to cat/sed/head/read/write/grep source files — use the read, write, edit, and grep tools instead.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -45,7 +45,7 @@
     "type": "function",
     "function": {
       "name": "write",
-      "description": "Create or overwrite a whole text file. Use for new files or full-file rewrites. Do not use bash cat/heredoc for this. For a small patch, prefer a later edit (old must be unique). Path is relative to the workspace, or an absolute path (absolute is used as-is). content is the full file text; empty string is allowed.",
+      "description": "Create or overwrite a whole text file. Use for new files or full-file rewrites. Do not use bash cat/heredoc for this. For a small in-place patch, use edit (old must be unique unless replace_all). Path is relative to the workspace, or an absolute path (absolute is used as-is). content is the full file text; empty string is allowed.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -59,6 +59,60 @@
           }
         },
         "required": ["path", "content"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "edit",
+      "description": "Replace a snippet in an existing file. old is exact text (not regex) copied from read without line numbers. old must appear exactly once unless replace_all is true. new may be empty to delete the snippet. Do not use this to create files — use write. Do not use bash sed for this.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path relative to the workspace, or an absolute path (absolute is used as-is)"
+          },
+          "old": {
+            "type": "string",
+            "description": "Exact text to find. Must be unique in the file unless replace_all is true. Cannot be empty."
+          },
+          "new": {
+            "type": "string",
+            "description": "Replacement text. Empty string deletes the snippet."
+          },
+          "replace_all": {
+            "type": "boolean",
+            "description": "If true, replace every occurrence of old. Default false."
+          }
+        },
+        "required": ["path", "old", "new"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "grep",
+      "description": "Search file contents with a regex. Returns path:line:content. Optional path (file or directory, default workspace) and glob (e.g. *.py). Prefer this over bash grep. Results are capped; if truncated, narrow path, glob, or pattern. Do not use this to read whole files — use read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Regular expression to search for"
+          },
+          "path": {
+            "type": "string",
+            "description": "File or directory to search. Defaults to the workspace."
+          },
+          "glob": {
+            "type": "string",
+            "description": "Only search files matching this glob, e.g. *.py or *.{ts,tsx}"
+          }
+        },
+        "required": ["pattern"]
       }
     }
   }

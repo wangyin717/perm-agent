@@ -135,8 +135,8 @@ class ReactAgentLoop(AgentLoop):
                 self._inject_steer(messages)
                 assistant_id = self._begin_llm_step()
                 response = await llm.call(messages, tools=TOOL_SCHEMAS, abort=abort)
+                log_llm_text(response.text or "")
                 if response.stop_reason == "end_turn" or not response.tool_calls:
-                    log_llm_text(response.text or "")
                     self._log.append_entry(
                         "assistant",
                         id=assistant_id,

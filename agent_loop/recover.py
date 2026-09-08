@@ -184,6 +184,10 @@ def entries_to_messages(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     - compaction_summary：取最新一条，covers_upto_seq 之前的 entry 全部跳过，
       摘要内容作为一条 user 消息插在最前面。
     - tool_result_redacted：就地覆盖同 result_id 的 tool_result 内容，不新增消息。
+
+    同一条 assistant 后面的 tool_result 按 tool_calls 顺序重排（并行完成序可能打乱）。
+    若某条 result.terminate=True，只投影到该条为止，并把 assistant.tool_calls
+    裁到与保留的 result 对齐。jsonl 本身不截。
     """
     covers_upto_seq, summary_content = latest_compaction_summary(rows)
     redactions = active_redactions(rows, covers_upto_seq)
@@ -205,19 +209,52 @@ def entries_to_messages(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "content": f"[Summary of earlier conversation (compacted)]\n{summary_content}",
             }
         )
-    for row in visible_entries(rows, covers_upto_seq):
-        entry_type = row.get("type")
-        if entry_type == "user":
-            messages.append({"role": "user", "content": row.get("content") or ""})
-        elif entry_type == "assistant":
-            msg: Dict[str, Any] = {
-                "role": "assistant",
-                "content": row.get("content") or "",
-            }
-            if row.get("tool_calls"):
-                msg["tool_calls"] = row["tool_calls"]
-            messages.append(msg)
-        elif entry_type == "tool_result":
+
+    pending_assistant: Optional[Dict[str, Any]] = None
+    pending_results: List[Dict[str, Any]] = []
+
+    def flush_assistant() -> None:
+        nonlocal pending_assistant, pending_results
+        if pending_assistant is None:
+            return
+        calls = list(pending_assistant.get("tool_calls") or [])
+        by_id = {
+            row.get("tool_call_id") or "": row
+            for row in pending_results
+            if row.get("tool_call_id")
+        }
+        ordered: List[Dict[str, Any]] = []
+        seen = set()
+        for call in calls:
+            call_id = call.get("id") or ""
+            row = by_id.get(call_id)
+            if row is not None:
+                ordered.append(row)
+                seen.add(call_id)
+        for row in pending_results:
+            call_id = row.get("tool_call_id") or ""
+            if call_id not in seen:
+                ordered.append(row)
+                seen.add(call_id)
+
+        cut = len(ordered)
+        for i, row in enumerate(ordered):
+            if row.get("terminate"):
+                cut = i + 1
+                break
+        ordered = ordered[:cut]
+        kept_ids = {row.get("tool_call_id") for row in ordered}
+
+        msg: Dict[str, Any] = {
+            "role": "assistant",
+            "content": pending_assistant.get("content") or "",
+        }
+        if calls:
+            trimmed = [call for call in calls if (call.get("id") or "") in kept_ids]
+            if trimmed:
+                msg["tool_calls"] = trimmed
+        messages.append(msg)
+        for row in ordered:
             result_id = row.get("result_id") or ""
             content = redactions.get(result_id, row.get("content") or "")
             messages.append(
@@ -228,6 +265,34 @@ def entries_to_messages(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "content": content,
                 }
             )
+        pending_assistant = None
+        pending_results = []
+
+    for row in visible_entries(rows, covers_upto_seq):
+        entry_type = row.get("type")
+        if entry_type == "user":
+            flush_assistant()
+            messages.append({"role": "user", "content": row.get("content") or ""})
+        elif entry_type == "assistant":
+            flush_assistant()
+            pending_assistant = row
+            if not row.get("tool_calls"):
+                flush_assistant()
+        elif entry_type == "tool_result":
+            if pending_assistant is not None:
+                pending_results.append(row)
+            else:
+                result_id = row.get("result_id") or ""
+                content = redactions.get(result_id, row.get("content") or "")
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": row.get("tool_call_id") or "",
+                        "name": row.get("tool_name") or "",
+                        "content": content,
+                    }
+                )
+    flush_assistant()
     return messages
 
 

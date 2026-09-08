@@ -29,6 +29,7 @@ from agent_loop.recover import (
     unfinished_assistant_id,
 )
 from agent_loop.session_log import SessionLog, session_log_path
+from agent_loop.tool_concurrency import run_tool_calls, terminate_cutoff
 from agent_loop.tool_runtime import ToolRuntime
 from agent_loop.tools.records import new_result_id
 from agent_loop.trace import log_context, log_llm_text, log_llm_tools, log_user
@@ -251,11 +252,17 @@ class ReactAgentLoop(AgentLoop):
         assistant_id: str,
         tracker: ContextUsageTracker,
     ) -> None:
-        """把 assistant 的 tool_calls 跑完，结果追加进 messages。"""
+        """把 assistant 的 tool_calls 跑完，结果追加进 messages。
+
+        一批全部执行（路径锁并发）。terminate 只截断喂给模型的 messages，
+        jsonl 照实保留所有已执行的 tool_result。assistant.tool_calls 在内存里
+        裁到与保留的 result 对齐，避免下一枪缺 tool message。
+        """
+        tool_calls = list(response.tool_calls or [])
         assistant_msg = {
             "role": "assistant",
             "content": response.text or "",
-            "tool_calls": response.tool_calls,
+            "tool_calls": list(tool_calls),
         }
         # 先落盘 assistant 消息本身，再跑工具——即便工具执行中途进程崩溃，
         # jsonl 里已经有这条 assistant+tool_calls，recover.py 能认出该走 resume_tools。
@@ -265,18 +272,17 @@ class ReactAgentLoop(AgentLoop):
             "assistant",
             id=assistant_id,
             content=response.text or "",
-            tool_calls=response.tool_calls,
+            tool_calls=tool_calls,
         )
-        for tool_call in response.tool_calls:
-            # call_tool 内部会依次落盘 tool_started（record）和 tool_result（entry），
-            # 所以就算这里再崩，磁盘上也能分清"已经开始跑但没跑完"和"还没开始"。
-            result = await self.runtime.call_tool(tool_call)
+        results = await run_tool_calls(self.runtime, tool_calls)
+        cut = terminate_cutoff(results)
+        assistant_msg["tool_calls"] = tool_calls[:cut]
+        if not assistant_msg["tool_calls"]:
+            assistant_msg.pop("tool_calls", None)
+        for result in results[:cut]:
             result_msg = result.to_message()
             messages.append(result_msg)
             tracker.add_estimate(result_msg)
-            if result.terminate:
-                # 工具主动要求终止本轮（比如遇到不可恢复的错误），后面排队的 tool_calls 不再跑。
-                break
 
 
 def _listen_sigint(abort: Abort):

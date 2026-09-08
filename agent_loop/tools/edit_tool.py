@@ -9,6 +9,7 @@ from agent_loop.tools.read_tool import before_tool_deny_empty_path, resolve_path
 
 NAME = "edit"
 REPLAY = "never"
+READ_ONLY = False
 
 
 def before_tool_deny_empty_old(event: Dict[str, Any]):

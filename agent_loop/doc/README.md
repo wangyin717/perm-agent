@@ -1,9 +1,9 @@
 # Agent Loop
 
 这套 loop 参考 pi harness-v2：本地可跑、jsonl 可对账。  
-还不是完整 pi（没有并行 tool、多 lane、SQLite）。
+还不是完整 pi（没有多 lane、SQLite）。
 
-加工具：写 `execute` + `REPLAY` + 自己的 hooks，登记进 `TOOLS`，不必改循环。
+加工具：写 `execute` + `REPLAY` + `READ_ONLY` + 自己的 hooks，登记进 `TOOLS`，不必改循环。
 
 ---
 
@@ -26,13 +26,13 @@ messages = [system] + jsonl 的 entry 投影（已应用 redaction / summary）
     仅当下一枪估算 ≥100% 窗口 → 压（回合中途保命）
     llm.call
     end_turn / 无 tool_calls → 写 assistant，内层可停
-    否则跑工具，tool result 进 messages
+    否则跑工具（准备串行、执行按路径锁并发），tool result 进 messages
   内层停稳 = 回合结束 → 按 80% 压
   drain follow_up，变成 steer，再开一圈内层
   没有 follow_up → return
 ```
 
-LLM 每步只有两种出口：`end_turn` 或 `tool_use`。没有 `MAX_STEPS`，和 pi 一样靠模型停；abort / 工具 `terminate` 可提前停。
+LLM 每步只有两种出口：`end_turn` 或 `tool_use`。没有 `MAX_STEPS`，和 pi 一样靠模型停；abort / 工具 `terminate` 可提前停（`terminate` 只截断喂给模型的投影，jsonl 仍记下所有已执行的结果）。
 
 `reply` 必须 `post_proxy.end()` 且 `send_to=User`，PostScheduler 才结束本轮。
 
@@ -73,7 +73,29 @@ end_turn 之后才进的 steer 当成**新回合**：先按 80% 做压缩，再�
 - bash / read / grep：`after_tool_truncate_output`（8k 字符）。这是写入时截断，第一次进 messages 就是短的，不改已经 cache 过的前缀。不要靠事后 micro 替代这道闸——micro 碰不到最近 10% 尾巴，而最大的工具结果往往就在那里。
 - bash：另有 `before_tool_deny_rm`
 
-加工具：`NAME` / `REPLAY` / `BEFORE_HOOKS` / `AFTER_HOOKS` / `execute` → `tools/registry.py`。
+加工具：`NAME` / `REPLAY` / `READ_ONLY` / `BEFORE_HOOKS` / `AFTER_HOOKS` / `execute` → `tools/registry.py`。
+
+---
+
+## 3.1 工具并行
+
+一批 `tool_calls` 分两阶段（`tool_concurrency.py`）：
+
+```text
+阶段一（严格串行）  逐个 before_tool + 写 tool_started
+                   unknown / blocked 直接产出错误结果，不进阶段二
+阶段二（并发）      READ_ONLY=False 且有 path 的调用，按解析后的绝对路径建锁
+                   任何调用命中这些写路径就排队；其余（含 bash）直接并发
+                   asyncio.gather 等完，返回顺序 = 原始调用顺序
+```
+
+| 工具 | `READ_ONLY` | 锁 |
+|---|---|---|
+| read / grep | True | 有 `path` 才参与；撞上本批某条写路径才排队 |
+| write / edit | False | 按解析后的绝对路径字符串全等加锁（不做目录包含） |
+| bash | 无 path | 不加锁 |
+
+`terminate`：四个都跑完。jsonl 照实记录所有 `tool_result`。喂给模型的 messages / `entries_to_messages` 投影按 `tool_calls` 顺序排，截到第一条 `terminate=True`，并把该条 assistant 的 `tool_calls` 裁到与保留的 result 对齐。恢复仍只看工单关没关，不认 terminate。
 
 ---
 
@@ -247,23 +269,8 @@ asyncio.wait_for(
 ## 10. 还没做的
 
 - `wait_for` 超时后打断沙箱里那次命令（见第 9 节）  
-- 并行 tool、多 lane、SQLite  
+- 多 lane、SQLite  
 - 同一 `reply()` 跑着时另一路 HTTP 自动入队（现在请显式 `inbox.push_steer` / `push_follow_up`）
-
----
-
-## 11. 和 SA 解耦（讨论）
-
-内核（`_run_loop` / `ToolRuntime` / jsonl / recover / inbox / compaction / llm / bash）几乎只依赖标准库 + `aiohttp` + 「有 `commands.run` 的 sandbox」。
-
-绑在 SA 上的是外壳 `reply()`：
-
-- `ExecutionDependencies`（Nacos/Session 那条链）
-- `memory.conversation.rounds[-1].user_query`
-- `event_emitter` + `Post` + `SendOutput` SSE
-- `user_action_data` 大袋子（sessionId / workspace / e2b_sandbox）
-
-独立开源时建议切成：**Kernel**（`run(user_query, *, sandbox, workspace, session_id) -> str`）+ **SA Adapter**（现有 `reply()` 只做翻译）。SA 继续用 Adapter；CLI/其它项目只依赖 Kernel。
 
 ---
 
@@ -289,7 +296,8 @@ agent_loop.py      reply + _run_loop + 两层循环 + 压缩检查点
 inbox.py           steer 插队 / follow_up 排队
 abort.py           Ctrl+C → 打断 LLM 退避
 compaction.py      maybe_compact / microcompact / summary / tracker
-tool_runtime.py    call_tool / started / result
+tool_runtime.py    call_tool / started / result（prepare + execute 可拆）
+tool_concurrency.py 一批 tool_calls：准备串行、按路径锁并发
 session_log.py     jsonl
 recover.py         inspect_log + apply_recovery + 投影 messages（含压缩）
 tools/bash_tool.py 执行、REPLAY、hooks、超时重试

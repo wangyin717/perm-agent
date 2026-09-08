@@ -15,6 +15,7 @@ from agent_loop.tools.read_tool import after_tool_truncate_output, resolve_path
 
 NAME = "grep"
 REPLAY = "safe"
+READ_ONLY = True
 
 MAX_SHOWN = 50
 MAX_COUNT = 10_000

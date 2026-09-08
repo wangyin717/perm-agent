@@ -9,6 +9,7 @@ from agent_loop.tools.read_tool import before_tool_deny_empty_path, resolve_path
 
 NAME = "write"
 REPLAY = "never"
+READ_ONLY = False
 
 BEFORE_HOOKS = [before_tool_deny_empty_path]
 AFTER_HOOKS: list = []

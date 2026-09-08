@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from agent_loop.session_log import SessionLog
 from agent_loop.tools.hooks import Hooks
+from agent_loop.tools.read_tool import resolve_path
 from agent_loop.tools.records import (
     ToolResultEntry,
     ToolStartedRecord,
@@ -16,6 +19,19 @@ from agent_loop.tools.records import (
 )
 from agent_loop.tools.registry import available_tool_names, get_tool
 from agent_loop.trace import log_tool_result
+
+
+@dataclass
+class PreparedCall:
+    """阶段一产出：要么已经有错误结果（未知/blocked），要么已盖章可以执行。"""
+
+    tool_call: Dict[str, Any]
+    call_id: str
+    name: str
+    tool: Any = None
+    started: Optional[ToolStartedRecord] = None
+    result: Optional[ToolResultEntry] = None
+    lock_path: Optional[str] = None
 
 
 class ToolRuntime:
@@ -30,12 +46,15 @@ class ToolRuntime:
         self._log = log
 
     async def call_tool(self, tool_call: Dict[str, Any], sandbox=None) -> ToolResultEntry:
-        """一次工具调用的完整流水线：
-        未知工具 / before_tool 拦截 → 直接出错，不落 tool_started（没有"开始跑"过）
-        → tool_started（落盘，标记这个工单已经开始跑，崩溃恢复靠它判断）
-        → execute（真正跑，异常也要落成错误结果，不能让异常往上抛丢了这次工单）
-        → after_tool（hook 可以改写结果内容/是否报错/是否终止本轮）
-        → tool_result（落盘关单，同一个 result_id 从 started 传到这里）
+        """一次工具调用的完整流水线。recover 仍走这条单次入口。"""
+        prepared = await self._prepare_call(tool_call)
+        if prepared.result is not None:
+            return prepared.result
+        return await self._execute_prepared(prepared, sandbox)
+
+    async def _prepare_call(self, tool_call: Dict[str, Any]) -> PreparedCall:
+        """未知工具 / before_tool 拦截 → 直接出错，不落 tool_started。
+        否则写 tool_started，算出路径锁 key（无 path 的工具 lock_path=None）。
         """
         call_id = tool_call.get("id") or ""
         name = (tool_call.get("function") or {}).get("name") or ""
@@ -43,24 +62,35 @@ class ToolRuntime:
 
         tool = get_tool(name)
         if tool is None:
-            return self.record_tool_result(
-                create_error_tool_result(
-                    result_id=new_result_id(),
-                    tool_call_id=call_id,
-                    tool_name=name,
-                    message=f"Unknown tool: {name}。可用工具：{available_tool_names()}",
-                )
+            return PreparedCall(
+                tool_call=tool_call,
+                call_id=call_id,
+                name=name,
+                result=self.record_tool_result(
+                    create_error_tool_result(
+                        result_id=new_result_id(),
+                        tool_call_id=call_id,
+                        tool_name=name,
+                        message=f"Unknown tool: {name}。可用工具：{available_tool_names()}",
+                    )
+                ),
             )
 
         decision = await self.hooks.run_before_tool(call_id, name, args)
         if decision.blocked:
-            return self.record_tool_result(
-                create_error_tool_result(
-                    result_id=new_result_id(),
-                    tool_call_id=call_id,
-                    tool_name=name,
-                    message=decision.message,
-                )
+            return PreparedCall(
+                tool_call=tool_call,
+                call_id=call_id,
+                name=name,
+                tool=tool,
+                result=self.record_tool_result(
+                    create_error_tool_result(
+                        result_id=new_result_id(),
+                        tool_call_id=call_id,
+                        tool_name=name,
+                        message=decision.message,
+                    )
+                ),
             )
 
         # 从这里开始才算"真的要跑了"：before_tool 可能已经改过 args（decision.args），
@@ -68,6 +98,34 @@ class ToolRuntime:
         started = self.record_tool_started(
             call_id, name, decision.args, _tool_replay(tool)
         )
+        return PreparedCall(
+            tool_call=tool_call,
+            call_id=call_id,
+            name=name,
+            tool=tool,
+            started=started,
+            lock_path=_lock_path(tool, started.effective_args, self.workspace),
+        )
+
+    async def _execute_prepared(
+        self, prepared: PreparedCall, sandbox=None
+    ) -> ToolResultEntry:
+        """execute → after_tool → tool_result。异常收口成错误结果，不往上抛。"""
+        if prepared.result is not None:
+            return prepared.result
+        started = prepared.started
+        if started is None or prepared.tool is None:
+            return self.record_tool_result(
+                create_error_tool_result(
+                    result_id=new_result_id(),
+                    tool_call_id=prepared.call_id,
+                    tool_name=prepared.name,
+                    message=f"Unknown tool: {prepared.name}。可用工具：{available_tool_names()}",
+                )
+            )
+        tool = prepared.tool
+        call_id = prepared.call_id
+        name = prepared.name
         try:
             content = await tool.execute(
                 started.effective_args, sandbox, workspace=self.workspace
@@ -181,6 +239,15 @@ class ToolRuntime:
 def _tool_replay(tool) -> str:
     replay = getattr(tool, "REPLAY", "never")
     return replay if replay in ("safe", "never") else "never"
+
+
+def _lock_path(tool, args: Dict[str, Any], workspace: Optional[str]) -> Optional[str]:
+    """有 path 字段才参与路径锁；bash 等没有 path 的工具返回 None。"""
+    raw = (args or {}).get("path")
+    if raw is None or not str(raw).strip():
+        return None
+    root = workspace or os.getcwd()
+    return str(resolve_path(str(raw).strip(), root))
 
 
 def _parse_args(tool_call: Dict[str, Any]) -> Dict[str, Any]:

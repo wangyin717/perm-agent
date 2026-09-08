@@ -420,7 +420,17 @@ def test_handle_tool_calls_does_not_double_count_assistant(tmp_path):
     )
 
     class _StubRuntime:
-        async def call_tool(self, tool_call, sandbox=None):
+        async def _prepare_call(self, tool_call):
+            from agent_loop.tool_runtime import PreparedCall
+
+            return PreparedCall(
+                tool_call=tool_call,
+                call_id=tool_call.get("id") or "",
+                name="read",
+                result=result,
+            )
+
+        async def _execute_prepared(self, prepared, sandbox=None):
             return result
 
     loop.runtime = _StubRuntime()

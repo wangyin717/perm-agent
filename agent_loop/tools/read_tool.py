@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 NAME = "read"
 REPLAY = "safe"
+READ_ONLY = True
 
 MAX_LINES = 1000
 MAX_BYTES = 100_000

@@ -1,6 +1,9 @@
 from agent_loop.trace import (
+    format_context_usage,
+    format_token_count,
     format_tool_line,
     format_tool_line_from_call,
+    log_context,
     log_llm_text,
     log_llm_tools,
     log_user,
@@ -8,6 +11,22 @@ from agent_loop.trace import (
     summarize_args,
     summarize_result,
 )
+
+
+def test_format_token_count():
+    assert format_token_count(206_000) == "206K"
+    assert format_token_count(500_000) == "500K"
+    assert format_token_count(1_000_000) == "1000K"
+    assert format_token_count(12) == "0K"
+
+
+def test_format_context_usage():
+    assert format_context_usage(206_000, 500_000) == "206K / 500K"
+
+
+def test_log_context(capsys):
+    log_context(206_000, 500_000)
+    assert capsys.readouterr().out == "206K / 500K\n\n"
 
 
 def test_one_line_collapses_newlines():

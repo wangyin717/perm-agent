@@ -159,6 +159,26 @@ def log_user(text: str) -> None:
     _section("User", text or "")
 
 
+def format_token_count(n: int) -> str:
+    """一律按 K：206000 → 206K，1000000 → 1000K。"""
+    n = max(int(n), 0)
+    return f"{int(round(n / 1000))}K"
+
+
+def format_context_usage(used: int, limit: int) -> str:
+    return f"{format_token_count(used)} / {format_token_count(limit)}"
+
+
+def log_context(used: int, limit: int) -> None:
+    _emit(f"{format_context_usage(used, limit)}\n\n")
+
+
+def log_compaction(level: str, before_ratio: float, after_ratio: float) -> None:
+    _emit(
+        f"[compaction:{level}] {before_ratio * 100:.0f}% -> {after_ratio * 100:.0f}%\n\n"
+    )
+
+
 def log_llm_text(text: str) -> None:
     body = (text or "").rstrip()
     if not body:

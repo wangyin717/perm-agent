@@ -24,6 +24,9 @@ class UnfinishedTool:
     replay: str
 
 
+_META_ENTRY_TYPES = {"tool_result_redacted", "compaction_summary"}
+
+
 @dataclass
 class RecoveryPlan:
     unfinished: List[UnfinishedTool] = field(default_factory=list)
@@ -34,6 +37,7 @@ class RecoveryPlan:
 
 
 def inspect_log(rows: List[Dict[str, Any]]) -> RecoveryPlan:
+    """纯函数：只看磁盘上的行，不发任何请求，判断上次进程停在哪一步、接下来该做什么。"""
     started = [
         row
         for row in rows
@@ -48,6 +52,8 @@ def inspect_log(rows: List[Dict[str, Any]]) -> RecoveryPlan:
     started_call_ids = {row.get("tool_call_id") for row in started if row.get("tool_call_id")}
     result_call_ids = {row.get("tool_call_id") for row in results if row.get("tool_call_id")}
 
+    # 有 tool_started 记录、但同 result_id 没有对应 tool_result：说明进程死在
+    # execute/hook 执行期间，工单开着没关。
     unfinished = []
     for row in started:
         result_id = row.get("result_id") or ""
@@ -62,12 +68,17 @@ def inspect_log(rows: List[Dict[str, Any]]) -> RecoveryPlan:
                 )
             )
 
+    # 跳过压缩产生的 meta entry（tool_result_redacted / compaction_summary），
+    # 它们不是"对话真的停在这里"，只是压缩记录，不能拿来判断恢复动作。
     last_entry = None
     for row in reversed(rows):
-        if row.get("kind") == "entry":
+        if row.get("kind") == "entry" and row.get("type") not in _META_ENTRY_TYPES:
             last_entry = row
             break
 
+    # 最后一条是 assistant+tool_calls，但其中某个 tool_call 既没 started 也没 result：
+    # 说明进程在"写完 assistant entry"和"调用 call_tool 开始执行"之间的窗口崩溃了，
+    # 工具连"开始跑"都没记录下来，需要重新触发 call_tool（而不是走 unfinished 的重放路径）。
     resume_tool_calls = []
     if last_entry and last_entry.get("type") == "assistant":
         for tool_call in last_entry.get("tool_calls") or []:
@@ -75,6 +86,13 @@ def inspect_log(rows: List[Dict[str, Any]]) -> RecoveryPlan:
             if call_id and call_id not in started_call_ids and call_id not in result_call_ids:
                 resume_tool_calls.append(tool_call)
 
+    # 六种恢复动作，按优先级判断（前面命中就不看后面）：
+    #   close_unfinished — 有工单开着没关，先关它（可能重放，也可能标 interrupted）
+    #   resume_tools     — 工单都关了，但有 tool_call 连开始跑都没记录，补跑
+    #   empty            — 全新会话，从头开始
+    #   continue_llm     — 最后是 tool_result，模型还没针对它说话，接着打 LLM
+    #   start_llm        — 最后是 user，还没打过 LLM
+    #   idle             — 最后是纯文本 assistant（正常收尾），等下一句新问题
     if unfinished:
         action = "close_unfinished"
     elif resume_tool_calls:
@@ -97,7 +115,14 @@ def inspect_log(rows: List[Dict[str, Any]]) -> RecoveryPlan:
 
 
 def unfinished_assistant_id(rows: List[Dict[str, Any]]) -> Optional[str]:
-    """最后一次 step_attempt 若还没有同 id 的 assistant entry，返回这个 id。"""
+    """最后一次 step_attempt 若还没有同 id 的 assistant entry，返回这个 id。
+
+    用于 _begin_llm_step：如果进程死在 llm.call 内部（还没写 assistant entry），
+    下次重启时"许诺过的 id"要被复用，不能凭空再发一个新 id 出来，否则会有一个
+    step_attempt record 永远对不上任何 assistant entry。按顺序扫一遍所有
+    step_attempt，谁的 id 还没被"兑现"（没同 id 的 assistant entry），谁就是当前
+    悬空的那个；一旦兑现了就清掉 open_id，继续找后面的。
+    """
     assistant_ids = {
         row.get("id")
         for row in rows
@@ -114,12 +139,73 @@ def unfinished_assistant_id(rows: List[Dict[str, Any]]) -> Optional[str]:
     return open_id
 
 
-def entries_to_messages(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """jsonl 里的 entry 投影成 LLM messages。record 不进上下文。"""
-    messages: List[Dict[str, Any]] = []
+def latest_compaction_summary(rows: List[Dict[str, Any]]) -> tuple[int, str]:
+    """最新一条 compaction_summary 的 (covers_upto_seq, content)；没有则是 (0, "")。"""
+    latest_seq = -1
+    covers_upto_seq = 0
+    summary_content = ""
     for row in rows:
-        if row.get("kind") != "entry":
+        if row.get("kind") == "entry" and row.get("type") == "compaction_summary":
+            seq = int(row.get("seq") or 0)
+            if seq >= latest_seq:
+                latest_seq = seq
+                covers_upto_seq = int(row.get("covers_upto_seq") or 0)
+                summary_content = row.get("content") or ""
+    return covers_upto_seq, summary_content
+
+
+def active_redactions(rows: List[Dict[str, Any]], covers_upto_seq: int) -> Dict[str, str]:
+    """result_id -> 占位内容，只算切点之后仍然生效的 tool_result_redacted。"""
+    redactions: Dict[str, str] = {}
+    for row in rows:
+        if row.get("kind") != "entry" or row.get("type") != "tool_result_redacted":
             continue
+        if int(row.get("seq") or 0) <= covers_upto_seq:
+            continue
+        redactions[row.get("result_id") or ""] = row.get("content") or ""
+    return redactions
+
+
+def visible_entries(rows: List[Dict[str, Any]], covers_upto_seq: int) -> List[Dict[str, Any]]:
+    """kind==entry、非 meta 类型、且在压缩切点之后的条目，原始顺序。"""
+    return [
+        row
+        for row in rows
+        if row.get("kind") == "entry"
+        and row.get("type") not in _META_ENTRY_TYPES
+        and int(row.get("seq") or 0) > covers_upto_seq
+    ]
+
+
+def entries_to_messages(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """jsonl 里的 entry 投影成 LLM messages。record 不进上下文。
+
+    压缩产生的两类 meta entry 在这里生效：
+    - compaction_summary：取最新一条，covers_upto_seq 之前的 entry 全部跳过，
+      摘要内容作为一条 user 消息插在最前面。
+    - tool_result_redacted：就地覆盖同 result_id 的 tool_result 内容，不新增消息。
+    """
+    covers_upto_seq, summary_content = latest_compaction_summary(rows)
+    redactions = active_redactions(rows, covers_upto_seq)
+    if summary_content or redactions:
+        logging.debug(
+            "[recover] projecting %d raw rows: covers_upto_seq=%d has_summary=%s "
+            "redacted_count=%d",
+            len(rows),
+            covers_upto_seq,
+            bool(summary_content),
+            len(redactions),
+        )
+
+    messages: List[Dict[str, Any]] = []
+    if summary_content:
+        messages.append(
+            {
+                "role": "user",
+                "content": f"[Summary of earlier conversation (compacted)]\n{summary_content}",
+            }
+        )
+    for row in visible_entries(rows, covers_upto_seq):
         entry_type = row.get("type")
         if entry_type == "user":
             messages.append({"role": "user", "content": row.get("content") or ""})
@@ -132,12 +218,14 @@ def entries_to_messages(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 msg["tool_calls"] = row["tool_calls"]
             messages.append(msg)
         elif entry_type == "tool_result":
+            result_id = row.get("result_id") or ""
+            content = redactions.get(result_id, row.get("content") or "")
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": row.get("tool_call_id") or "",
                     "name": row.get("tool_name") or "",
-                    "content": row.get("content") or "",
+                    "content": content,
                 }
             )
     return messages
@@ -156,6 +244,11 @@ def should_append_user(plan: RecoveryPlan, user_query: str) -> bool:
 
 
 def can_replay(item: UnfinishedTool) -> bool:
+    """必须两边都是 safe：当时 jsonl 里记的 replay，和现在代码里这个工具的 REPLAY 声明。
+
+    工具代码可能在两次运行之间改过（比如 bash 从 safe 改成 never），只看当时记的
+    replay 不够——要用现在的声明重新确认一次，否则可能重放一个已经不再安全的操作。
+    """
     if item.replay != "safe":
         return False
     tool = get_tool(item.tool_name)
@@ -168,6 +261,7 @@ async def apply_unfinished(
     unfinished: List[UnfinishedTool],
     sandbox=None,
 ) -> None:
+    """收尸开着的工单：能安全重放的重新跑一遍，不能的直接标 interrupted 关掉。"""
     for item in unfinished:
         if can_replay(item):
             await _replay_one(runtime, item, sandbox)
@@ -176,6 +270,7 @@ async def apply_unfinished(
 
 
 async def apply_recovery(runtime: ToolRuntime, plan: RecoveryPlan, sandbox=None) -> None:
+    """inspect_log 给出 plan 之后，真正落地执行——这一步会写盘（tool_result entry）。"""
     await apply_unfinished(runtime, plan.unfinished, sandbox)
     if plan.action == "resume_tools":
         for tool_call in plan.resume_tool_calls:
@@ -183,6 +278,10 @@ async def apply_recovery(runtime: ToolRuntime, plan: RecoveryPlan, sandbox=None)
 
 
 async def _replay_one(runtime: ToolRuntime, item: UnfinishedTool, sandbox=None) -> None:
+    """重新跑一遍这个工具（用当时记的 effective_args），走完整 execute→after_tool 流程，
+    最后用原来的 result_id 关单——这样投影出的 messages 里 tool_call 和 tool_result
+    还是配对的，只是内容变成了这次重放的结果。
+    """
     tool = get_tool(item.tool_name)
     if tool is None:
         _interrupt_one(runtime, item)
@@ -240,6 +339,9 @@ async def _replay_one(runtime: ToolRuntime, item: UnfinishedTool, sandbox=None) 
 
 
 def _interrupt_one(runtime: ToolRuntime, item: UnfinishedTool) -> None:
+    """不能重放（never 或工具已不再声明 safe）：不猜它到底跑完没有，直接标一条错误
+    tool_result 关单，把决定权交给模型（模型看到 interrupted 会自己决定要不要重跑）。
+    """
     logging.info(
         "[recover] interrupt tool=%s result_id=%s",
         item.tool_name,

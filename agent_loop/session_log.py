@@ -37,12 +37,18 @@ class SessionLog:
             f.flush()
 
     def read_all(self) -> List[Dict[str, Any]]:
+        """seq 按文件中的行号（从 1 开始）现算，不落盘。append-only 保证行号即写入顺序，
+        对老日志（没有过 seq 字段的时代写的行）天然兼容，不会因为缺字段被当成 0 而漏读。
+        """
         if not self.path.exists():
             return []
         rows = []
         with open(self.path, encoding="utf-8") as f:
-            for line in f:
+            for i, line in enumerate(f, start=1):
                 line = line.strip()
-                if line:
-                    rows.append(json.loads(line))
+                if not line:
+                    continue
+                row = json.loads(line)
+                row["seq"] = i
+                rows.append(row)
         return rows

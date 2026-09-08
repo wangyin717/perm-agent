@@ -18,6 +18,7 @@ import yaml
 from typing import Any, Dict, Optional
 
 from agent_loop.abort import Abort
+from agent_loop.compaction import ContextUsageTracker, maybe_compact
 from agent_loop.inbox import UserInbox
 from agent_loop.llm import DeepSeekLLM
 from agent_loop.recover import (
@@ -30,7 +31,7 @@ from agent_loop.recover import (
 from agent_loop.session_log import SessionLog, session_log_path
 from agent_loop.tool_runtime import ToolRuntime
 from agent_loop.tools.records import new_result_id
-from agent_loop.trace import log_llm_text, log_llm_tools, log_user
+from agent_loop.trace import log_context, log_llm_text, log_llm_tools, log_user
 from agent_loop.deps import ExecutionDependencies
 
 _DIR = os.path.dirname(__file__)
@@ -64,10 +65,13 @@ class AgentLoop:
             answer = await self._run_loop(user_query, user_action_data)
             post_proxy.post.message = answer or ""
         except Exception as exc:
+            # 这里兜底的是"当前进程内"的异常（比如网络问题、代码 bug）；不是崩溃恢复——
+            # 那种情况走的是下次 _run_loop 开头的 inspect_log/apply_recovery。
             logging.exception("[AgentLoop] reply 出错")
             user_action_data["_round_failed_with_exception"] = True
             error_detail = str(exc) or type(exc).__name__
             post_proxy.post.message = f"执行出错：{error_detail}"
+        # 必须调用 end()：契约里唯一能让 PostScheduler 结束本轮的路径。
         return post_proxy.end()
 
 
@@ -102,41 +106,79 @@ class ReactAgentLoop(AgentLoop):
         self._log = SessionLog(session_log_path(user_action_data))
         self.runtime.attach_log(self._log)
         self.runtime.workspace = str(user_action_data.get("workspace") or os.getcwd())
+        # 每次进程启动都可能是接着上次崩溃的现场：先看盘上停在哪一步。
         plan = inspect_log(self._log.read_all())
         if plan.action not in ("idle", "empty"):
             logging.info("[recover] action=%s unfinished=%s", plan.action, len(plan.unfinished))
+        # 关掉未完成的工具工单（重放或标 interrupted）、补跑漏掉的 tool_calls。
         await apply_recovery(self.runtime, plan)
+        # apply_recovery 可能新增了 tool_result entry，必须重新 inspect 才能拿到最新 action。
         plan = inspect_log(self._log.read_all())
 
         if plan.action == "continue_llm":
+            # 上一轮已经有 tool_result 在等 LLM 收尾，这句新问题不能夹在中间打断，
+            # 先当 steer 排队，等这一轮说完再喂给模型。
             self.inbox.push_steer(user_query)
         elif should_append_user(plan, user_query):
             self._log.append_entry("user", content=user_query)
             log_user(user_query)
         else:
+            # start_llm 且盘上最后一条 user 就是这句问题：说明是崩溃后原样重跑，不重复写。
             log_user(user_query)
 
+        # messages 是每次运行时从 jsonl 现算的投影，不是持久状态；jsonl 才是唯一权威。
+        # entries_to_messages 会应用之前落盘的压缩记录（redaction / summary），
+        # 所以这里拿到的已经是"压缩后应该发给模型"的样子，不是原始全量历史。
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(entries_to_messages(self._log.read_all()))
         llm = self._get_llm()
+        tracker = ContextUsageTracker(context_window=getattr(llm, "context_window", 0) or 0)
+        # bootstrap 是本地估算，不发请求；第一次真实 llm.call 拿到 usage 后会被校准掉。
+        tracker.bootstrap(messages)
+        logging.info(
+            "[AgentLoop] session=%s loaded %d messages, ratio=%.3f (window=%d)",
+            self._log.path.stem,
+            len(messages),
+            tracker.usage_ratio(),
+            tracker.context_window,
+        )
         abort = Abort()
         stop_listening = _listen_sigint(abort)
         try:
-            return await self._run_outer_inner(messages, llm, abort)
+            return await self._run_outer_inner(messages, llm, abort, tracker)
         finally:
             stop_listening()
 
-    async def _run_outer_inner(self, messages: list, llm, abort: Abort) -> str:
+    async def _run_outer_inner(
+        self, messages: list, llm, abort: Abort, tracker: ContextUsageTracker
+    ) -> str:
         """外层：内层停稳后才消费 follow_up。内层：每步（含 tool result）之后插入 steer。"""
         final_text = ""
         while True:
             has_more_tools = True
+            # has_more_tools 撑着内层至少跑一次；has_steer 让新插队的话有机会再挨一轮 LLM，
+            # 即便上一步已经是 end_turn（has_more_tools=False）。
             while has_more_tools or self.inbox.has_steer():
-                self._inject_steer(messages)
+                self._inject_steer(messages, tracker)
                 assistant_id = self._begin_llm_step()
+                # 每次真正打模型之前才检查是否要压缩，压缩会原地重写 messages。
+                await maybe_compact(self._log, messages, tracker, llm, abort=abort)
+                estimated_tokens = tracker.known_tokens
                 response = await llm.call(messages, tools=TOOL_SCHEMAS, abort=abort)
+                # 真实 usage 到手，覆盖掉本地估算——两次真实调用之间的误差不会累积。
+                tracker.update_from_response(response)
+                if response.prompt_tokens:
+                    logging.debug(
+                        "[AgentLoop] token estimate drift: local_estimate=%d real_prompt_tokens=%d",
+                        estimated_tokens,
+                        response.prompt_tokens,
+                    )
+                used = response.prompt_tokens + response.completion_tokens
+                if used:
+                    log_context(used, getattr(llm, "context_window", 0) or 0)
                 log_llm_text(response.text or "")
                 if response.stop_reason == "end_turn" or not response.tool_calls:
+                    # 模型说完了：只写 assistant entry，不用管 tool_calls。
                     self._log.append_entry(
                         "assistant",
                         id=assistant_id,
@@ -145,23 +187,34 @@ class ReactAgentLoop(AgentLoop):
                     final_text = response.text or ""
                     has_more_tools = False
                 else:
+                    # 模型还要调工具：先落盘 assistant+tool_calls，再逐个跑，跑完继续内层。
                     log_llm_tools(response.tool_calls)
-                    await self._handle_tool_calls(messages, response, assistant_id)
+                    await self._handle_tool_calls(messages, response, assistant_id, tracker)
                     has_more_tools = True
+            # 内层停稳（没工具、没插队）才看有没有排队的 follow_up；有就转成 steer 重开一圈内层。
             follow = self.inbox.drain_follow_up()
             if not follow:
                 return final_text
             for text in follow:
                 self.inbox.push_steer(text)
 
-    def _inject_steer(self, messages: list) -> None:
+    def _inject_steer(self, messages: list, tracker: ContextUsageTracker) -> None:
+        """把用户在这一轮跑着的时候插的话，当成新的 user 消息塞进当前 messages。"""
         for text in self.inbox.drain_steer():
             self._log.append_entry("user", content=text)
-            messages.append({"role": "user", "content": text})
+            msg = {"role": "user", "content": text}
+            messages.append(msg)
+            tracker.add_estimate(msg)  # steer 是新内容，本地估算里得算上，真实 usage 还没到
             log_user(text)
 
     def _begin_llm_step(self) -> str:
-        """llm.call 之前盖章。若上次 attempt 没关，复用同一个 assistant id。"""
+        """llm.call 之前盖章。若上次 attempt 没关，复用同一个 assistant id。
+
+        "盖章"指先写一条 step_attempt record（不进模型上下文），预分配好这次 LLM
+        回复要用的 assistant id。这样如果进程在 llm.call 里崩溃，下次重启用
+        unfinished_assistant_id 能认出"这个 id 已经许诺过、还没写 assistant entry"，
+        接着用同一个 id 重试，而不是产生一个孤儿 id。
+        """
         open_id = unfinished_assistant_id(self._log.read_all())
         if open_id:
             logging.info("[ReactAgentLoop] 复用未关闭的 step_attempt id=%s", open_id)
@@ -176,16 +229,22 @@ class ReactAgentLoop(AgentLoop):
         return assistant_id
 
     async def _handle_tool_calls(
-        self, messages: list, response, assistant_id: str
+        self,
+        messages: list,
+        response,
+        assistant_id: str,
+        tracker: ContextUsageTracker,
     ) -> None:
         """把 assistant 的 tool_calls 跑完，结果追加进 messages。"""
-        messages.append(
-            {
-                "role": "assistant",
-                "content": response.text or "",
-                "tool_calls": response.tool_calls,
-            }
-        )
+        assistant_msg = {
+            "role": "assistant",
+            "content": response.text or "",
+            "tool_calls": response.tool_calls,
+        }
+        # 先落盘 assistant 消息本身，再跑工具——即便工具执行中途进程崩溃，
+        # jsonl 里已经有这条 assistant+tool_calls，recover.py 能认出该走 resume_tools。
+        messages.append(assistant_msg)
+        tracker.add_estimate(assistant_msg)
         self._log.append_entry(
             "assistant",
             id=assistant_id,
@@ -193,9 +252,14 @@ class ReactAgentLoop(AgentLoop):
             tool_calls=response.tool_calls,
         )
         for tool_call in response.tool_calls:
+            # call_tool 内部会依次落盘 tool_started（record）和 tool_result（entry），
+            # 所以就算这里再崩，磁盘上也能分清"已经开始跑但没跑完"和"还没开始"。
             result = await self.runtime.call_tool(tool_call)
-            messages.append(result.to_message())
+            result_msg = result.to_message()
+            messages.append(result_msg)
+            tracker.add_estimate(result_msg)
             if result.terminate:
+                # 工具主动要求终止本轮（比如遇到不可恢复的错误），后面排队的 tool_calls 不再跑。
                 break
 
 

@@ -30,6 +30,13 @@ class ToolRuntime:
         self._log = log
 
     async def call_tool(self, tool_call: Dict[str, Any], sandbox=None) -> ToolResultEntry:
+        """一次工具调用的完整流水线：
+        未知工具 / before_tool 拦截 → 直接出错，不落 tool_started（没有"开始跑"过）
+        → tool_started（落盘，标记这个工单已经开始跑，崩溃恢复靠它判断）
+        → execute（真正跑，异常也要落成错误结果，不能让异常往上抛丢了这次工单）
+        → after_tool（hook 可以改写结果内容/是否报错/是否终止本轮）
+        → tool_result（落盘关单，同一个 result_id 从 started 传到这里）
+        """
         call_id = tool_call.get("id") or ""
         name = (tool_call.get("function") or {}).get("name") or ""
         args = _parse_args(tool_call)
@@ -56,6 +63,8 @@ class ToolRuntime:
                 )
             )
 
+        # 从这里开始才算"真的要跑了"：before_tool 可能已经改过 args（decision.args），
+        # 后面 execute/重放都必须用这份改过的 effective_args，不能再看原始 args。
         started = self.record_tool_started(
             call_id, name, decision.args, _tool_replay(tool)
         )
@@ -65,6 +74,7 @@ class ToolRuntime:
             )
             is_error = False
         except Exception as exc:
+            # execute 允许直接 throw；这里统一收口成错误结果，循环不会因为异常中断。
             logging.warning("[tool] %s failed: %s", name, exc)
             content = str(exc)
             is_error = True
@@ -115,6 +125,10 @@ class ToolRuntime:
         effective_args: Dict[str, Any],
         replay: str,
     ) -> ToolStartedRecord:
+        """写 kind=record（不进模型上下文），生成新 result_id。
+        这个 result_id 会一路传到 record_tool_result，是判断"工单开着没关"的钥匙——
+        inspect_log 靠"有 started 没有同 result_id 的 result"识别未完成工单。
+        """
         record = ToolStartedRecord(
             tool_call_id=tool_call_id,
             tool_name=tool_name,
@@ -140,6 +154,10 @@ class ToolRuntime:
         return record
 
     def record_tool_result(self, entry: ToolResultEntry) -> ToolResultEntry:
+        """写 kind=entry（进模型上下文），用传入的 result_id 关单——
+        成功路径必须沿用 started.result_id；失败路径（未知工具/block）自己生成新 id，
+        因为那些路径压根没有对应的 started 记录。
+        """
         self.tool_result_records.append(entry)
         if self._log:
             self._log.append_entry(

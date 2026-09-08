@@ -61,6 +61,8 @@ class Hooks:
         current_args = dict(args or {})
         handlers = self.before_tool_handlers.get(tool_name) or []
 
+        # 链式执行：后一个 handler 看到的是前一个改过的 args，不是原始 args；
+        # 任何一个 handler 返回 block 就立即短路，后面的 handler 不会再跑。
         for handler in handlers:
             event = {
                 "tool_call_id": tool_call_id,
@@ -110,6 +112,8 @@ class Hooks:
         terminate = False
         handlers = self.after_tool_handlers.get(tool_name) or []
 
+        # 同样是链式：content/is_error 会被逐个 handler 累积改写；terminate 一旦被
+        # 某个 handler 置为 True 就不会再被后面的 handler 清掉（这里没有 elif None 分支）。
         for handler in handlers:
             event = {
                 "tool_call_id": tool_call_id,

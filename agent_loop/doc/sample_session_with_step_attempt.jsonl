@@ -1,7 +1,0 @@
-{"kind": "entry", "type": "user", "id": "user-1", "content": "随便写一段python代码并运行一下"}
-{"kind": "record", "type": "step_attempt", "step": "assistant", "attempt": 1, "result_entry_id": "asst-1"}
-{"kind": "entry", "type": "assistant", "id": "asst-1", "content": "我来写一段简单的 Python 代码并运行它。", "tool_calls": [{"id": "call_01", "type": "function", "function": {"name": "bash", "arguments": "{\"cmd\": \"python3 -c 'print(1+1)'\"}"}}]}
-{"kind": "record", "type": "tool_started", "tool_call_id": "call_01", "tool_name": "bash", "effective_args": {"cmd": "python3 -c 'print(1+1)'"}, "replay": "safe", "result_id": "tool-1"}
-{"kind": "entry", "type": "tool_result", "id": "tool-1", "result_id": "tool-1", "tool_call_id": "call_01", "tool_name": "bash", "content": "2", "is_error": false, "terminate": false}
-{"kind": "record", "type": "step_attempt", "step": "assistant", "attempt": 1, "result_entry_id": "asst-2"}
-{"kind": "entry", "type": "assistant", "id": "asst-2", "content": "代码已跑完，输出是 2。"}

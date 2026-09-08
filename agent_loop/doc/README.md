@@ -118,8 +118,6 @@ end_turn 之后才进的 steer 当成**新回合**：先按 80% 做压缩，再�
 
 权威是 jsonl。内存 list 只是本轮缓存。
 
-样例：`doc/sample_session_with_step_attempt.jsonl`
-
 ---
 
 ## 5. 上下文压缩

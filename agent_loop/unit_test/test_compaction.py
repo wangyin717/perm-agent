@@ -1,20 +1,28 @@
-"""压缩三档：pick_level 边界、轮次切分、microcompact 清理、half/full 摘要投影。"""
+"""压缩：回合结束 80% 进场、中途仅超窗、micro + summary、最近 10% 完整轮次保留。"""
 
 from __future__ import annotations
 
 import asyncio
 
+from agent_loop.agent_loop import ReactAgentLoop
 from agent_loop.compaction import (
+    KEEP_TAIL_RATIO,
+    OVERFLOW_RATIO,
+    SUCCESS_RATIO,
+    TRIGGER_RATIO,
     ContextUsageTracker,
+    _keep_tail_start,
     _round_starts,
     _tail_start_index,
+    estimate_tokens,
     maybe_compact,
-    pick_level,
     run_microcompact,
     run_summary_compaction,
 )
+from agent_loop.llm.deepseek import LLMResponse
 from agent_loop.recover import entries_to_messages
 from agent_loop.session_log import SessionLog, session_log_path
+from agent_loop.tools.records import ToolResultEntry
 
 
 class ScriptedSummaryLLM:
@@ -84,29 +92,27 @@ def _seed_round(log, idx, tool_name="bash", content_len=1000, is_error=False):
     log.append_entry("assistant", id=f"asst-{idx}-2", content=f"round {idx} done")
 
 
+def _over_trigger_log(log, rounds=10, content_len=2000, window=4000):
+    """造一份 ratio ≥ 80% 的会话，返回 (messages, tracker)。"""
+    for i in range(rounds):
+        _seed_round(log, i, tool_name="bash", content_len=content_len)
+    messages = [{"role": "system", "content": "sys"}]
+    messages.extend(entries_to_messages(log.read_all()))
+    tracker = ContextUsageTracker(context_window=window)
+    tracker.bootstrap(messages)
+    return messages, tracker
+
+
 # ---------------------------------------------------------------------------
-# pick_level
+# 阈值常量
 # ---------------------------------------------------------------------------
 
 
-def test_pick_level_below_threshold_returns_none():
-    assert pick_level(0.10) is None
-
-
-def test_pick_level_boundaries():
-    assert pick_level(0.29) is None
-    assert pick_level(0.30) == "microcompact"
-    assert pick_level(0.60) == "microcompact"
-    assert pick_level(0.79) == "microcompact"
-    assert pick_level(0.80) == "half_summary"
-    assert pick_level(0.89) == "half_summary"
-    assert pick_level(0.90) == "full_compact"
-    assert pick_level(0.99) == "full_compact"
-
-
-def test_pick_level_only_highest_hit_wins():
-    # 0.82 同时越过 0.30 和 0.80 两条线，只应命中 half_summary
-    assert pick_level(0.82) == "half_summary"
+def test_threshold_constants():
+    assert TRIGGER_RATIO == 0.80
+    assert OVERFLOW_RATIO == 1.00
+    assert SUCCESS_RATIO == 0.30
+    assert KEEP_TAIL_RATIO == 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +157,18 @@ def test_tail_start_index_zero_budget_keeps_nothing():
     assert _tail_start_index(entries, [0], tail_budget_tokens=0) == len(entries)
 
 
+def test_keep_tail_start_at_least_last_round(tmp_path):
+    log = _log(tmp_path)
+    for i in range(4):
+        _seed_round(log, i, tool_name="bash", content_len=200)
+    from agent_loop.recover import visible_entries
+
+    entries = visible_entries(log.read_all(), 0)
+    # 窗口很小，10% 预算盖不住最后一轮，切点仍应是最后一轮的 user
+    idx = _keep_tail_start(entries, context_window=50)
+    assert idx == _round_starts(entries)[-1]
+
+
 # ---------------------------------------------------------------------------
 # microcompact
 # ---------------------------------------------------------------------------
@@ -161,7 +179,7 @@ def test_microcompact_redacts_old_safe_tool_result_outside_tail(tmp_path):
     for i in range(6):
         _seed_round(log, i, tool_name="bash", content_len=1000)
 
-    # context_window 小，tail 预算窄，前面几轮应该会被清理
+    # context_window 小，10% 尾巴窄，前面几轮应该会被清理
     cleared = run_microcompact(log, log.read_all(), context_window=2000)
     assert cleared > 0
 
@@ -174,9 +192,8 @@ def test_microcompact_redacts_old_safe_tool_result_outside_tail(tmp_path):
 
     messages = entries_to_messages(rows)
     tool_msgs = [m for m in messages if m.get("role") == "tool"]
-    # 最早一轮的工具结果应该已经被占位符覆盖
     assert "redacted" in tool_msgs[0]["content"]
-    # 最近一轮（在保护尾部内）应该还是原始长内容
+    # 最近一轮（在 keep 尾巴内）应该还是原始长内容
     assert tool_msgs[-1]["content"] == "x" * 1000
 
 
@@ -217,82 +234,60 @@ def test_microcompact_is_idempotent_second_pass_finds_nothing_new(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# half_summary / full_compact
+# summary
 # ---------------------------------------------------------------------------
 
 
-def test_full_compact_keeps_only_last_round(tmp_path):
-    log = _log(tmp_path)
-    for i in range(4):
-        _seed_round(log, i, tool_name="bash", content_len=200)
-
-    llm = ScriptedSummaryLLM(["## Goal\nsummarized rounds 0-2"])
-    changed = asyncio.run(
-        run_summary_compaction(log, log.read_all(), llm, "full_compact", context_window=2000)
-    )
-    assert changed is True
-
-    rows = log.read_all()
-    summary_rows = [r for r in rows if r.get("type") == "compaction_summary"]
-    assert len(summary_rows) == 1
-    assert summary_rows[0]["level"] == "full_compact"
-
-    messages = entries_to_messages(rows)
-    assert messages[0]["role"] == "user"
-    assert "compacted" in messages[0]["content"]
-    assert "summarized rounds 0-2" in messages[0]["content"]
-    # 最后一轮完整保留：user + assistant(tool_call) + tool + assistant
-    remaining = messages[1:]
-    assert remaining[0]["content"] == "round 3 question"
-    assert any(m.get("role") == "tool" for m in remaining)
-
-
-def test_half_summary_keeps_recent_tail(tmp_path):
+def test_summary_keeps_recent_tail(tmp_path):
     log = _log(tmp_path)
     for i in range(8):
         _seed_round(log, i, tool_name="bash", content_len=200)
 
     llm = ScriptedSummaryLLM(["## Goal\nfirst summary"])
     changed = asyncio.run(
-        run_summary_compaction(log, log.read_all(), llm, "half_summary", context_window=2000)
+        run_summary_compaction(log, log.read_all(), llm, context_window=2000)
     )
     assert changed is True
 
     rows = log.read_all()
+    summary_rows = [r for r in rows if r.get("type") == "compaction_summary"]
+    assert len(summary_rows) == 1
+    assert summary_rows[0]["level"] == "summary"
+
     messages = entries_to_messages(rows)
+    assert messages[0]["role"] == "user"
     assert "compacted" in messages[0]["content"]
-    # 最近若干轮应该原样保留（不是摘要文本）
+    assert "first summary" in messages[0]["content"]
     tail_user_msgs = [m["content"] for m in messages[1:] if m["role"] == "user"]
     assert any(c.startswith("round ") for c in tail_user_msgs)
+    assert tail_user_msgs[-1] == "round 7 question"
 
 
 def test_cumulative_summary_passes_previous_summary_to_prompt(tmp_path):
     log = _log(tmp_path)
-    for i in range(4):
+    for i in range(8):
         _seed_round(log, i, tool_name="bash", content_len=200)
 
     llm = ScriptedSummaryLLM(["## Goal\nfirst summary"])
-    asyncio.run(
-        run_summary_compaction(log, log.read_all(), llm, "full_compact", context_window=2000)
-    )
+    asyncio.run(run_summary_compaction(log, log.read_all(), llm, context_window=2000))
 
-    for i in range(4, 6):
+    for i in range(8, 12):
         _seed_round(log, i, tool_name="bash", content_len=200)
 
     llm2 = ScriptedSummaryLLM(["## Goal\nmerged summary"])
     changed = asyncio.run(
-        run_summary_compaction(log, log.read_all(), llm2, "full_compact", context_window=2000)
+        run_summary_compaction(log, log.read_all(), llm2, context_window=2000)
     )
     assert changed is True
     prompt = llm2.calls[0]["messages"][1]["content"]
-    assert "first summary" in prompt  # <previous_summary> 被带入了新的摘要请求
+    assert "first summary" in prompt
 
     rows = log.read_all()
     summary_rows = [r for r in rows if r.get("type") == "compaction_summary"]
     assert len(summary_rows) == 2
     messages = entries_to_messages(rows)
     assert "merged summary" in messages[0]["content"]
-    assert "first summary" not in messages[0]["content"]  # 投影只用最新一条摘要
+    assert "first summary" not in messages[0]["content"]
 
 
 def test_summary_compaction_noop_when_nothing_to_summarize(tmp_path):
@@ -301,11 +296,24 @@ def test_summary_compaction_noop_when_nothing_to_summarize(tmp_path):
 
     llm = ScriptedSummaryLLM(["should not be used"])
     changed = asyncio.run(
-        run_summary_compaction(log, log.read_all(), llm, "full_compact", context_window=2000)
+        run_summary_compaction(log, log.read_all(), llm, context_window=2000)
     )
-    # 只有一轮，full_compact 的 keep_tail_start 就是这一轮本身，没有可摘要内容
+    # 只有一轮，keep 切点就是这一轮本身，没有可摘要内容
     assert changed is False
     assert llm.calls == []
+
+
+def test_summary_uses_micro_redactions_in_transcript(tmp_path):
+    log = _log(tmp_path)
+    for i in range(6):
+        _seed_round(log, i, tool_name="bash", content_len=1000)
+    run_microcompact(log, log.read_all(), context_window=2000)
+
+    llm = ScriptedSummaryLLM(["## Goal\nafter micro"])
+    asyncio.run(run_summary_compaction(log, log.read_all(), llm, context_window=2000))
+    prompt = llm.calls[0]["messages"][1]["content"]
+    assert "redacted" in prompt
+    assert "x" * 1000 not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -313,32 +321,125 @@ def test_summary_compaction_noop_when_nothing_to_summarize(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_maybe_compact_noop_below_threshold(tmp_path):
+def test_maybe_compact_noop_below_trigger(tmp_path):
     log = _log(tmp_path)
     _seed_round(log, 0, tool_name="bash", content_len=100)
-    messages = entries_to_messages(log.read_all())
+    messages = [{"role": "system", "content": "sys"}]
+    messages.extend(entries_to_messages(log.read_all()))
     tracker = ContextUsageTracker(context_window=1_000_000)
     tracker.bootstrap(messages)
+    assert tracker.usage_ratio() < TRIGGER_RATIO
 
     llm = ScriptedSummaryLLM([])
     changed = asyncio.run(maybe_compact(log, messages, tracker, llm))
     assert changed is False
+    assert llm.calls == []
+    assert messages[0]["role"] == "system"
 
 
-def test_maybe_compact_runs_microcompact_when_over_threshold(tmp_path):
+def test_maybe_compact_overflow_only_skips_when_under_window(tmp_path):
+    """回合中途：已经过了 80% 但还没满窗，不该拆当前回合的前缀。"""
     log = _log(tmp_path)
-    for i in range(6):
-        _seed_round(log, i, tool_name="bash", content_len=1000)
-    messages = entries_to_messages(log.read_all())
-    tracker = ContextUsageTracker(context_window=6000)
-    tracker.bootstrap(messages)
-    before_ratio = tracker.usage_ratio()
-    assert 0.30 <= before_ratio < 0.80
+    messages, tracker = _over_trigger_log(log)
+    tracker.known_tokens = int(tracker.context_window * 0.85)
+    assert TRIGGER_RATIO <= tracker.usage_ratio() < OVERFLOW_RATIO
+    llm = ScriptedSummaryLLM(["## Goal\nshould not run"])
+    changed = asyncio.run(
+        maybe_compact(log, messages, tracker, llm, overflow_only=True)
+    )
+    assert changed is False
+    assert llm.calls == []
 
-    llm = ScriptedSummaryLLM([])
+
+def test_maybe_compact_overflow_only_runs_when_window_full(tmp_path):
+    log = _log(tmp_path)
+    messages, tracker = _over_trigger_log(log)
+    tracker.known_tokens = tracker.context_window
+    llm = ScriptedSummaryLLM(["## Goal\noverflow summary"])
+    changed = asyncio.run(
+        maybe_compact(log, messages, tracker, llm, overflow_only=True)
+    )
+    assert changed is True
+    assert llm.calls
+
+
+def test_maybe_compact_cascade_micro_then_summary(tmp_path):
+    log = _log(tmp_path)
+    messages, tracker = _over_trigger_log(log)
+    assert tracker.usage_ratio() >= TRIGGER_RATIO
+
+    llm = ScriptedSummaryLLM(["## Goal\ncascade summary"])
     changed = asyncio.run(maybe_compact(log, messages, tracker, llm))
     assert changed is True
-    assert llm.calls == []  # microcompact 不应该发起摘要 LLM 调用
     assert any(r.get("type") == "tool_result_redacted" for r in log.read_all())
-    # messages 被原地重写（同一个 list 对象），token 用量应该下降
-    assert tracker.usage_ratio() < before_ratio
+    assert llm.calls  # micro 之后仍 >30%，同一集里接着 summary
+    assert messages[0]["role"] == "system"
+    assert any(
+        "cascade summary" in (m.get("content") or "") for m in messages if m.get("role") == "user"
+    )
+
+
+def test_maybe_compact_preserves_system_prompt(tmp_path):
+    log = _log(tmp_path)
+    messages, tracker = _over_trigger_log(log)
+    llm = ScriptedSummaryLLM(["## Goal\nkeep system"])
+    asyncio.run(maybe_compact(log, messages, tracker, llm))
+    assert messages[0] == {"role": "system", "content": "sys"}
+
+
+def test_maybe_compact_empty_summary_keeps_micro_progress(tmp_path):
+    log = _log(tmp_path)
+    messages, tracker = _over_trigger_log(log)
+    llm = ScriptedSummaryLLM([""])  # 摘要失败
+    changed = asyncio.run(maybe_compact(log, messages, tracker, llm))
+    assert any(r.get("type") == "tool_result_redacted" for r in log.read_all())
+    assert changed is True  # micro 已经落盘
+    assert not any(
+        r.get("type") == "compaction_summary" for r in log.read_all()
+    )
+
+
+# ---------------------------------------------------------------------------
+# tracker 记账：completion 已经是 assistant，tool 路径不能再估一遍
+# ---------------------------------------------------------------------------
+
+
+def test_handle_tool_calls_does_not_double_count_assistant(tmp_path):
+    """update_from_response 已经把 prompt+completion 写入 known_tokens。
+
+    completion 就是即将 append 的 assistant 消息，再 add_estimate(assistant)
+    会让下一枪 compact 判断虚高。只该补上 completion 里没有的 tool_result。
+    """
+    loop = ReactAgentLoop(None, None, None)
+    loop._log = _log(tmp_path)
+    result = ToolResultEntry(
+        result_id="r1",
+        tool_call_id="call-1",
+        tool_name="read",
+        content="hello world",
+    )
+
+    class _StubRuntime:
+        async def call_tool(self, tool_call, sandbox=None):
+            return result
+
+    loop.runtime = _StubRuntime()
+    response = LLMResponse(
+        text="reading",
+        tool_calls=[
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "read", "arguments": "{}"},
+            }
+        ],
+        stop_reason="tool_use",
+        prompt_tokens=10_000,
+        completion_tokens=400,
+    )
+    tracker = ContextUsageTracker(context_window=1_000_000)
+    tracker.update_from_response(response)
+
+    asyncio.run(loop._handle_tool_calls([], response, "asst-1", tracker))
+
+    assert tracker.known_tokens == 10_000 + 400 + estimate_tokens(result.to_message())

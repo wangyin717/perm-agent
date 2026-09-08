@@ -1,7 +1,7 @@
 # Agent Loop
 
 这套 loop 参考 pi harness-v2：本地可跑、jsonl 可对账。  
-还不是完整 pi（没有并行 tool、compaction、多 lane、SQLite）。
+还不是完整 pi（没有并行 tool、多 lane、SQLite）。
 
 加工具：写 `execute` + `REPLAY` + 自己的 hooks，登记进 `TOOLS`，不必改循环。
 
@@ -16,16 +16,19 @@
 再 inspect 一次
 continue_llm → 本轮新话进 inbox.steer（插队）
 其它该写 user → append user
-messages = [system] + jsonl 的 entry 投影
+messages = [system] + jsonl 的 entry 投影（已应用 redaction / summary）
 
 外层 while:
   内层 while (还有 tool 或 steer):
+    若上一枪已 end_turn、接下来要吃 steer → 按 80% 压（新回合）
     drain steer → 写 user entry + 推进 messages
     写 step_attempt（或复用未关的 assistant id）
+    仅当下一枪估算 ≥100% 窗口 → 压（回合中途保命）
     llm.call
     end_turn / 无 tool_calls → 写 assistant，内层可停
     否则跑工具，tool result 进 messages
-  内层停稳 → drain follow_up，变成 steer，再开一圈内层
+  内层停稳 = 回合结束 → 按 80% 压
+  drain follow_up，变成 steer，再开一圈内层
   没有 follow_up → return
 ```
 
@@ -48,6 +51,8 @@ LLM 每步只有两种出口：`end_turn` 或 `tool_use`。没有 `MAX_STEPS`，
 
 「请继续」更像 follow_up；「请继续，用英文」更像 steer。
 
+end_turn 之后才进的 steer 当成**新回合**：先按 80% 做压缩，再注入。
+
 ---
 
 ## 3. 工具 hook
@@ -65,7 +70,8 @@ LLM 每步只有两种出口：`end_turn` 或 `tool_use`。没有 `MAX_STEPS`，
 
 - hook 只返回意见，**不准** `messages.append`
 - `block` / 未知工具：**不写** started，直接 `create_error_tool_result`
-- bash：`before_tool_deny_rm`、`after_tool_truncate_output`
+- bash / read / grep：`after_tool_truncate_output`（8k 字符）。这是写入时截断，第一次进 messages 就是短的，不改已经 cache 过的前缀。不要靠事后 micro 替代这道闸——micro 碰不到最近 10% 尾巴，而最大的工具结果往往就在那里。
+- bash：另有 `before_tool_deny_rm`
 
 加工具：`NAME` / `REPLAY` / `BEFORE_HOOKS` / `AFTER_HOOKS` / `execute` → `tools/registry.py`。
 
@@ -79,11 +85,14 @@ LLM 每步只有两种出口：`end_turn` 或 `tool_use`。没有 `MAX_STEPS`，
 |---|---|---|---|
 | record | step_attempt | 即将打 LLM，预分配 assistant id | 否 |
 | record | tool_started | 即将执行工具 | 否 |
-| entry | user / assistant / tool_result | 对话 | 是 |
+| entry | user / assistant / tool_result | 对话 | 是（压缩切点之后的才投影） |
+| entry | tool_result_redacted | micro 把某条 tool_result 换成占位符 | 否（投影时覆盖同 result_id 的正文） |
+| entry | compaction_summary | summary 切点之前的摘要 | 否（投影成最前面一条 user） |
 
 - `step_attempt.result_entry_id` = 随后那条 assistant 的 `id`
 - `tool_started.result_id` = 随后那条 tool_result 的 `result_id`
 - blocked / unknown 没有 started，result 自己生成 id
+- `compaction_summary.covers_upto_seq`：这条 seq 及之前的可见 entry 不再进模型，改由摘要代表
 
 权威是 jsonl。内存 list 只是本轮缓存。
 
@@ -91,7 +100,58 @@ LLM 每步只有两种出口：`end_turn` 或 `tool_use`。没有 `MAX_STEPS`，
 
 ---
 
-## 5. 进程崩溃恢复
+## 5. 上下文压缩
+
+`compaction.py`。为了 KV / prompt cache：能追加就追加到回合结束，压缩是回合之间的换班，不是每枪手术。
+
+### 检查时机
+
+| 时机 | 条件 | 在哪 |
+|---|---|---|
+| 回合结束 | `ratio ≥ 80%` | 内层停稳之后；或 end_turn 后改吃 steer 之前 |
+| 回合中途 | `ratio ≥ 100%`（下一枪会超窗） | 每次 `llm.call` 之前，`overflow_only=True` |
+
+低于 80% 不改已经发出去的前缀。中途 80%–100% 之间继续追加，让当前回合吃热 cache。
+
+### 同一集 cascade
+
+进场后做完再打主模型，中间不穿插主对话请求：
+
+```text
+≥ 触发线
+  → microcompact（不打摘要 LLM）
+  → 重投影 + 重算 ratio
+  → ≤30% 收工
+  → 仍 >30%：一次 summary（独立请求）
+  → 仍 >30%：最后一轮太大，停止
+```
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `TRIGGER_RATIO` | 80% | 回合结束进场 |
+| `OVERFLOW_RATIO` | 100% | 中途保命 |
+| `SUCCESS_RATIO` | 30% | 收工线 |
+| `KEEP_TAIL_RATIO` | 10% | 最近这段完整轮次原样留（对齐到 user 边界，至少一轮） |
+
+**microcompact**：只抠 keep 切点之外、`REPLAY==safe`、≥800 字符的旧 `read`/`grep`/`bash` 正文，换成可再调用的占位符。不删消息、不拆 tool 配对。write/edit（`REPLAY=never`）和短结果不动。micro 经常到不了 30%（骨架、最近 10%、tool_call arguments 都还在），这是预期；它给 summary 当 prelude。
+
+**summary**：keep 切点之前送给独立摘要 LLM（系统提示是「摘要助手」，不带主对话、不带 tools），结构化输出 Goal / Progress / Key decisions / Files touched / Next steps。结果写成 `compaction_summary` 纯文本，换模型也能接着用。有上一次摘要则累积更新，不并排。
+
+压完形态：`[system][tools][summary user][最近 10% 轮次]`。投影走 `entries_to_messages`，会丢掉切点之前的原文。
+
+### token 估算（`ContextUsageTracker`）
+
+`known_tokens` 用来在下一枪之前估 prompt 有多大。
+
+- `update_from_response`：`prompt + completion` 覆盖。completion 就是即将进下一枪的 assistant。
+- `add_estimate`：只补 completion 里没有的新消息（steer / tool_result）。**不要再估一遍 assistant**，否则 ratio 虚高。
+- 压缩落盘后 `_reproject`：保留开头的 system，再 `bootstrap`。
+
+`chars//4` 只填两次真实 usage 之间的空；下一枪 API usage 会校准。
+
+---
+
+## 6. 进程崩溃恢复
 
 下次 `_run_loop` **开头**读 jsonl，不猜进程。当前进程里的异常走 `try/except`，不走 `recover.py`。
 
@@ -104,13 +164,15 @@ LLM 每步只有两种出口：`end_turn` 或 `tool_use`。没有 `MAX_STEPS`，
 | 最后只有 user | start_llm | **会**投影后打模型；同一句 user 不重复写 |
 | 最后是纯文本 assistant | idle | 无需恢复；新问题当本轮 user |
 
-`replay` 要 **当时 jsonl 里的** 和 **现在代码里的 `REPLAY`** 都是 `safe` 才重放。bash 目前 `safe`。
+`replay` 要 **当时 jsonl 里的** 和 **现在代码里的 `REPLAY`** 都是 `safe` 才重放。bash / read / grep 目前 `safe`；write / edit 是 `never`。
 
 Ctrl+C 是取消，不是崩溃：未关工具更合理写 interrupted，不要当 safe 重放。崩溃才是进程没了、只剩文件。
 
+恢复后投影同样走 `entries_to_messages`，所以崩溃前落盘的 redaction / summary 下次进程还能看见。
+
 ---
 
-## 6. LLM 失败：重试 vs step_attempt（不要混）
+## 7. LLM 失败：重试 vs step_attempt（不要混）
 
 三件不同的「再试一次」：
 
@@ -126,7 +188,7 @@ Ctrl+C：`Abort` 打断退避和卡住的 POST（`RetryCancelledError`）。不�
 
 ---
 
-## 7. 每个工具的错误捕获（bash）
+## 8. 每个工具的错误捕获（bash）
 
 失败必须 **throw**，`ToolRuntime` 统一 `create_error_tool_result`（`is_error=true`），loop 继续，模型能看见。
 
@@ -151,7 +213,7 @@ Ctrl+C：`Abort` 打断退避和卡住的 POST（`RetryCancelledError`）。不�
 
 ---
 
-## 8. `wait_for` 杀不掉线程里的 `run`（讨论）
+## 9. `wait_for` 杀不掉线程里的 `run`（讨论）
 
 代码是：
 
@@ -182,17 +244,17 @@ asyncio.wait_for(
 
 ---
 
-## 9. 还没做的
+## 10. 还没做的
 
-- `wait_for` 超时后打断沙箱里那次命令（见第 8 节）  
-- 并行 tool、compaction、多 lane、SQLite  
+- `wait_for` 超时后打断沙箱里那次命令（见第 9 节）  
+- 并行 tool、多 lane、SQLite  
 - 同一 `reply()` 跑着时另一路 HTTP 自动入队（现在请显式 `inbox.push_steer` / `push_follow_up`）
 
 ---
 
-## 10. 和 SA 解耦（讨论）
+## 11. 和 SA 解耦（讨论）
 
-内核（`_run_loop` / `ToolRuntime` / jsonl / recover / inbox / llm / bash）几乎只依赖标准库 + `aiohttp` + 「有 `commands.run` 的 sandbox」。
+内核（`_run_loop` / `ToolRuntime` / jsonl / recover / inbox / compaction / llm / bash）几乎只依赖标准库 + `aiohttp` + 「有 `commands.run` 的 sandbox」。
 
 绑在 SA 上的是外壳 `reply()`：
 
@@ -205,7 +267,7 @@ asyncio.wait_for(
 
 ---
 
-## 11. 下一步（讨论）
+## 12. 下一步（讨论）
 
 循环已经够用。优先 **加工具**，不改 loop：每个工具 `NAME` / `REPLAY` / hooks / `execute`，登记 `TOOLS`。
 
@@ -216,19 +278,20 @@ asyncio.wait_for(
 3. **edit** — **已做。** 精确替换（`path` / `old` / `new`，可选 `replace_all`），`old` 必须唯一除非 `replace_all`；`REPLAY=never`；空 old 在 before_tool 拦住
 4. **grep** — **已做。** 正则搜内容（`pattern`，可选 `path` / `glob`），`path:line:content`，最多 50 条并带总数 footer；`REPLAY=safe`；有 rg 用 rg，否则 Python 走目录
 
-有 **bash + read + write + edit + grep** 就够当最小 coding agent。
+有 **bash + read + write + edit + grep** 就够当最小 coding agent。压缩已接进 loop。
 
 ---
 
 ## 文件对照
 
 ```text
-agent_loop.py      reply + _run_loop + 两层循环
+agent_loop.py      reply + _run_loop + 两层循环 + 压缩检查点
 inbox.py           steer 插队 / follow_up 排队
 abort.py           Ctrl+C → 打断 LLM 退避
+compaction.py      maybe_compact / microcompact / summary / tracker
 tool_runtime.py    call_tool / started / result
 session_log.py     jsonl
-recover.py         inspect_log + apply_recovery + 投影 messages
+recover.py         inspect_log + apply_recovery + 投影 messages（含压缩）
 tools/bash_tool.py 执行、REPLAY、hooks、超时重试
 tools/read_tool.py / write_tool.py / edit_tool.py / grep_tool.py
 tools/records.py   StepAttemptRecord / ToolStartedRecord / ToolResultEntry

@@ -1,13 +1,15 @@
-"""按 context_window 占比分级压缩上下文。
+"""按 context_window 占比压缩上下文。两级，同一集里做完再打主模型。
 
-三档，命中多档只执行最高一档：
-  30%  microcompact  —— 清理"最近尾部"之外、REPLAY=="safe" 的旧 tool_result，
-                        替换成占位符（可重新调用工具恢复）。不改变对话结构。
-  80%  half_summary  —— 前半段送 LLM 摘要（累积式，带上一次摘要），保留最近尾部原样。
-  90%  full_compact  —— 同 half_summary，但只保留最后一轮完整对话，其余全摘要。
+检查时机（对齐 Pi）：回合结束后看 ≥80% 再压，好让这一回合的请求继续吃 KV cache。
+回合中途只在下一枪估算已经 ≥100%（会超窗）时才压。
 
-同一档在会话生命周期里反复命中是预期行为（microcompact 清理对象耗尽后自然退化成
-no-op，ratio 继续升高会自动升级到更高档）。
+  ≥80%  回合结束进场。只追加、不改历史，直到这条线。
+  microcompact  先清最近 10% 之外、REPLAY=="safe" 的旧 tool_result，换成占位符。
+  ≤30%  收工。micro 之后够瘦就不再摘要。
+  summary       仍 >30%：前面变摘要，最近 10% 完整轮次原样留（至少一轮）。
+  仍 >30%       最后一轮自己太大，认栽继续，不再压。
+
+micro 和 summary 共用同一个 keep 切点，prelude 不会 redact 准备留下的尾巴。
 """
 
 from __future__ import annotations
@@ -28,19 +30,13 @@ from agent_loop.session_log import SessionLog
 from agent_loop.tools.registry import get_tool
 from agent_loop.trace import log_compaction, summarize_args
 
-PROTECTED_TAIL_RATIO = 0.15  # microcompact 永不触碰的最近尾部占比
-HALF_SUMMARY_TAIL_RATIO = 0.40  # half_summary 摘要后保留的最近尾部占比
+TRIGGER_RATIO = 0.80  # 回合结束：低于这条线不改已经发出去的前缀
+OVERFLOW_RATIO = 1.00  # 回合中途：下一枪估算达到窗口才压
+SUCCESS_RATIO = 0.30  # 压到这条线以下就收工
+KEEP_TAIL_RATIO = 0.10  # 最近这段完整轮次原样保留（窗口占比，对齐到 user 边界）
 MIN_REDACT_CHARS = 800  # 短于此长度的 tool_result 不值得清理
 SUMMARY_MAX_TOKENS = 4000  # 摘要请求本身的输出长度上限（防止摘要越摘越长）
 TOOL_RESULT_MAX_CHARS = 2000  # 摘要请求里单条 tool_result 的截断长度
-
-# 必须按阈值从高到低排列——pick_level 遍历时第一个命中的就是答案，
-# 顺序反了会导致"只执行最高一档"这条规则失效。
-COMPACTION_LEVELS = [
-    (0.90, "full_compact"),
-    (0.80, "half_summary"),
-    (0.30, "microcompact"),
-]
 
 SUMMARIZATION_SYSTEM_PROMPT = (
     "You are a context summarization assistant for a coding agent. Summarize the "
@@ -83,8 +79,10 @@ Keep the same structure:
 class ContextUsageTracker:
     """维护"当前上下文大概用了多少 token"的滚动估算。
 
-    真实 usage 只在每次 llm.call 之后才知道；两次真实调用之间新追加的消息
-    （steer / assistant+tool_calls / tool_result）用 chars//4 的启发式估算补上。
+    真实 usage 只在每次 llm.call 之后才知道。update_from_response 用
+    prompt+completion 覆盖 known_tokens——completion 就是即将进入下一枪
+    prompt 的 assistant 消息。两次真实调用之间只把 completion 里没有的
+    新消息（steer / tool_result）用 chars//4 补上，不要再估一遍 assistant。
     """
 
     context_window: int
@@ -97,16 +95,18 @@ class ContextUsageTracker:
         self.known_tokens = sum(estimate_tokens(m) for m in messages)
 
     def update_from_response(self, response) -> None:
-        """每次真实 llm.call 之后调用，用 API 返回的真实 usage 覆盖掉本地估算——
-        校准累积误差，两次真实调用之间的估算偏差不会一直累加下去。
+        """每次真实 llm.call 之后调用，用 API 返回的真实 usage 覆盖掉本地估算。
+
+        known_tokens = prompt + completion。这已经是「旧 prompt + 本枪 assistant」
+        的下一枪基数；校准累积误差，两次真实调用之间的估算偏差不会一直累加。
         """
         used = (response.prompt_tokens or 0) + (response.completion_tokens or 0)
         if used:
             self.known_tokens = used
 
     def add_estimate(self, message: Dict[str, Any]) -> None:
-        """两次真实 llm.call 之间，每 append 一条新消息（steer/assistant/tool_result）
-        就调一次，让 known_tokens 能实时反映"发下一次请求前大概会有多大"。
+        """两次真实 llm.call 之间，只给 completion 里没有的新消息补估算
+        （steer / tool_result）。assistant 已含在 completion_tokens 里，不要再调。
         """
         self.known_tokens += estimate_tokens(message)
 
@@ -127,14 +127,16 @@ def estimate_tokens(obj: Any) -> int:
     return max(len(text) // 4, 0)
 
 
-def pick_level(ratio: float) -> Optional[str]:
-    """COMPACTION_LEVELS 按阈值从高到低排列，第一个 ratio 达到的阈值就是命中的档位——
-    这就是"同时越过多条线，只执行最高一档"的实现方式，不需要额外的优先级判断。
-    """
-    for threshold, level in COMPACTION_LEVELS:
-        if ratio >= threshold:
-            return level
-    return None
+def _reproject(messages: list, log: SessionLog, tracker: ContextUsageTracker) -> None:
+    """压缩落盘后重新投影。保留 messages 开头连续的 system，避免把系统提示弄丢。"""
+    leading = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            leading.append(msg)
+        else:
+            break
+    messages[:] = leading + entries_to_messages(log.read_all())
+    tracker.bootstrap(messages)
 
 
 async def maybe_compact(
@@ -143,62 +145,83 @@ async def maybe_compact(
     tracker: ContextUsageTracker,
     llm,
     abort: Optional[Abort] = None,
+    *,
+    overflow_only: bool = False,
 ) -> bool:
-    """压缩的唯一入口。在下一次 llm.call 之前调用。
+    """压缩的唯一入口。
 
-    命中阈值则原地重写 messages（`messages[:] = ...`，保留同一个 list 对象，
-    这样调用方持有的引用不会失效）并返回 True；未命中或压缩无实际效果返回 False。
-    这里只负责"判断该做什么、调对应的 run_* 函数、把结果重新投影回 messages"，
-    具体怎么清理/怎么摘要交给下面两个函数。
+    overflow_only=False：回合结束，≥80% 进场。
+    overflow_only=True：回合中途，只有估算已经 ≥100%（下一枪会超窗）才进场。
+    同一集里先 micro，仍 >30% 再 summary。命中则原地重写 messages。
     """
     ratio = tracker.usage_ratio()
-    level = pick_level(ratio)
-    if level is None:
-        logging.debug("[compaction] ratio=%.3f below 30%% threshold, skip", ratio)
+    min_ratio = OVERFLOW_RATIO if overflow_only else TRIGGER_RATIO
+    if ratio < min_ratio:
+        logging.debug(
+            "[compaction] ratio=%.3f below %.0f%% (%s), skip",
+            ratio,
+            min_ratio * 100,
+            "overflow" if overflow_only else "turn-end",
+        )
         return False
 
     logging.info(
-        "[compaction] ratio=%.3f (known_tokens=%d/%d) hit level=%s",
+        "[compaction] ratio=%.3f (known_tokens=%d/%d) enter cascade (%s)",
         ratio,
         tracker.known_tokens,
         tracker.context_window,
-        level,
+        "overflow" if overflow_only else "turn-end",
     )
-    rows = log.read_all()
+    changed = False
 
-    if level == "microcompact":
-        # microcompact 只读写 jsonl、不调 LLM，同步执行即可。
-        cleared = run_microcompact(log, rows, tracker.context_window)
-        changed = cleared > 0
-        if not changed:
-            # 可清理的旧结果已经耗尽：这次是空转，ratio 会继续涨，下次自然升级到
-            # half_summary/full_compact——不需要在这里维护"升级"状态。
-            logging.info("[compaction] microcompact found nothing to redact, no-op")
+    cleared = run_microcompact(log, log.read_all(), tracker.context_window)
+    if cleared > 0:
+        _reproject(messages, log, tracker)
+        changed = True
+        log_compaction("microcompact", ratio, tracker.usage_ratio())
+        logging.info(
+            "[compaction] microcompact %.3f -> %.3f (known_tokens=%d)",
+            ratio,
+            tracker.usage_ratio(),
+            tracker.known_tokens,
+        )
     else:
-        changed = await run_summary_compaction(
-            log, rows, llm, level, tracker.context_window, abort=abort
+        logging.info("[compaction] microcompact found nothing to redact, no-op")
+
+    if tracker.usage_ratio() <= SUCCESS_RATIO:
+        return changed
+
+    before_summary = tracker.usage_ratio()
+    summarized = await run_summary_compaction(
+        log, log.read_all(), llm, tracker.context_window, abort=abort
+    )
+    if summarized:
+        _reproject(messages, log, tracker)
+        changed = True
+        log_compaction("summary", before_summary, tracker.usage_ratio())
+        logging.info(
+            "[compaction] summary %.3f -> %.3f (known_tokens=%d)",
+            before_summary,
+            tracker.usage_ratio(),
+            tracker.known_tokens,
+        )
+    else:
+        logging.warning(
+            "[compaction] summary did not apply (empty or nothing to keep-cut); "
+            "continuing at ratio=%.3f",
+            tracker.usage_ratio(),
         )
 
-    if not changed:
-        return False
-
-    # 压缩记录已经落盘，重新走一遍完整投影拿到压缩后的样子，再重新本地估算校准 tracker
-    # （压缩后的用量不能沿用旧的 known_tokens，必须重算）。
-    messages[:] = entries_to_messages(log.read_all())
-    tracker.bootstrap(messages)
-    logging.info(
-        "[compaction] %s done: %.3f -> %.3f (known_tokens=%d)",
-        level,
-        ratio,
-        tracker.usage_ratio(),
-        tracker.known_tokens,
-    )
-    log_compaction(level, ratio, tracker.usage_ratio())
-    return True
+    if tracker.usage_ratio() > SUCCESS_RATIO:
+        logging.info(
+            "[compaction] still %.3f after cascade (last round likely too large), stop",
+            tracker.usage_ratio(),
+        )
+    return changed
 
 
 # ---------------------------------------------------------------------------
-# 轮次边界 / 尾部预算：microcompact 和摘要共用同一套切分逻辑
+# 轮次边界 / 尾部预算：microcompact 和摘要共用同一个切点
 # ---------------------------------------------------------------------------
 
 
@@ -239,8 +262,8 @@ def _tail_start_index(
 ) -> int:
     """从末尾往前累计 token，找到第一个≥预算的位置，再对齐到不晚于它的轮次起点。
 
-    只给「会整段删除消息」的场景用（half_summary/full_compact）——删除整条消息可能
-    拆散 tool_call/tool_result 配对，必须对齐轮次边界。
+    删除整条消息可能拆散 tool_call/tool_result 配对，必须对齐轮次边界。
+    最后一轮即使比预算肥，也会被对齐回去——至少留一轮完整对话。
     """
     if not entries:
         return 0
@@ -251,29 +274,32 @@ def _tail_start_index(
     return max(candidates) if candidates else 0
 
 
+def _keep_tail_start(entries: List[Dict[str, Any]], context_window: int) -> int:
+    """最近 KEEP_TAIL_RATIO 窗口，对齐到轮次起点。"""
+    if not entries or not context_window:
+        return 0
+    return _tail_start_index(
+        entries, _round_starts(entries), KEEP_TAIL_RATIO * context_window
+    )
+
+
 # ---------------------------------------------------------------------------
 # microcompact
 # ---------------------------------------------------------------------------
 
 
 def run_microcompact(log: SessionLog, rows: List[Dict[str, Any]], context_window: int) -> int:
-    """清理 protected tail 之外、REPLAY=="safe" 的旧 tool_result。返回清理条数。"""
+    """清理 keep 尾巴之外、REPLAY=="safe" 的旧 tool_result。返回清理条数。"""
     if not context_window:
         return 0
     covers_upto_seq, _ = latest_compaction_summary(rows)
     entries = visible_entries(rows, covers_upto_seq)
     redactions = active_redactions(rows, covers_upto_seq)
-
-    # redaction 是就地覆盖 tool_result 内容，不删消息、不拆 tool_call/tool_result
-    # 配对，所以不需要对齐轮次边界，可以用原始 token 预算切点。
-    tail_budget = PROTECTED_TAIL_RATIO * context_window
-    tail_start = _raw_tail_cutoff(entries, tail_budget)
+    tail_start = _keep_tail_start(entries, context_window)
     logging.debug(
-        "[compaction:microcompact] %d visible entries, protected tail starts at index %d "
-        "(budget=%.0f tokens)",
+        "[compaction:microcompact] %d visible entries, keep tail starts at index %d",
         len(entries),
         tail_start,
-        tail_budget,
     )
 
     started_by_result_id = {
@@ -317,7 +343,7 @@ def run_microcompact(log: SessionLog, rows: List[Dict[str, Any]], context_window
 
 
 # ---------------------------------------------------------------------------
-# half_summary / full_compact
+# summary
 # ---------------------------------------------------------------------------
 
 
@@ -349,40 +375,33 @@ async def run_summary_compaction(
     log: SessionLog,
     rows: List[Dict[str, Any]],
     llm,
-    level: str,
     context_window: int,
     abort: Optional[Abort] = None,
 ) -> bool:
-    """half_summary：摘要前面，保留最近 40% 尾部。full_compact：只保留最后一轮。"""
+    """摘要 keep 切点之前的可见条目，最近 KEEP_TAIL_RATIO（至少一轮）原样留。"""
+    if not context_window:
+        return False
     covers_upto_seq, previous_summary = latest_compaction_summary(rows)
     entries = visible_entries(rows, covers_upto_seq)
     if not entries:
         logging.info(
-            "[compaction:%s] nothing visible after seq=%d, no-op", level, covers_upto_seq
+            "[compaction:summary] nothing visible after seq=%d, no-op", covers_upto_seq
         )
         return False
     redactions = active_redactions(rows, covers_upto_seq)
-    round_starts = _round_starts(entries)
-
-    if level == "full_compact":
-        keep_tail_start = round_starts[-1] if round_starts else len(entries)
-    else:
-        tail_budget = HALF_SUMMARY_TAIL_RATIO * context_window
-        keep_tail_start = _tail_start_index(entries, round_starts, tail_budget)
+    keep_tail_start = _keep_tail_start(entries, context_window)
 
     to_summarize = entries[:keep_tail_start]
     if not to_summarize:
         logging.info(
-            "[compaction:%s] tail budget keeps all %d visible entries, nothing to summarize",
-            level,
+            "[compaction:summary] tail budget keeps all %d visible entries, nothing to summarize",
             len(entries),
         )
         return False
 
     logging.info(
-        "[compaction:%s] summarizing %d/%d visible entries (keeping tail of %d), "
+        "[compaction:summary] summarizing %d/%d visible entries (keeping tail of %d), "
         "cumulative=%s",
-        level,
         len(to_summarize),
         len(entries),
         len(entries) - len(to_summarize),
@@ -401,9 +420,8 @@ async def run_summary_compaction(
         {"role": "user", "content": prompt},
     ]
     logging.debug(
-        "[compaction:%s] dispatching standalone summarization request (%d chars transcript, "
+        "[compaction:summary] dispatching standalone summarization request (%d chars transcript, "
         "not sharing main conversation's messages/cache prefix)",
-        level,
         len(transcript),
     )
     response = await llm.call(
@@ -411,7 +429,7 @@ async def run_summary_compaction(
     )
     summary_text = (response.text or "").strip()
     if not summary_text:
-        logging.warning("[compaction:%s] summarization LLM call returned empty text, no-op", level)
+        logging.warning("[compaction:summary] summarization LLM call returned empty text, no-op")
         return False
 
     covers_upto = int(to_summarize[-1].get("seq") or 0)
@@ -419,11 +437,10 @@ async def run_summary_compaction(
         "compaction_summary",
         content=summary_text,
         covers_upto_seq=covers_upto,
-        level=level,
+        level="summary",
     )
     logging.info(
-        "[compaction:%s] wrote compaction_summary covering seq<=%d (%d chars)",
-        level,
+        "[compaction:summary] wrote compaction_summary covering seq<=%d (%d chars)",
         covers_upto,
         len(summary_text),
     )

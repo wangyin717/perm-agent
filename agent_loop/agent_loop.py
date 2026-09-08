@@ -152,17 +152,32 @@ class ReactAgentLoop(AgentLoop):
     async def _run_outer_inner(
         self, messages: list, llm, abort: Abort, tracker: ContextUsageTracker
     ) -> str:
-        """外层：内层停稳后才消费 follow_up。内层：每步（含 tool result）之后插入 steer。"""
+        """外层：内层停稳后才消费 follow_up。内层：每步（含 tool result）之后插入 steer。
+
+        压缩：回合中途只在下一枪会超窗时压；内层停稳（或 end_turn 后改吃 steer）按 80% 压。
+        """
         final_text = ""
         while True:
             has_more_tools = True
             # has_more_tools 撑着内层至少跑一次；has_steer 让新插队的话有机会再挨一轮 LLM，
             # 即便上一步已经是 end_turn（has_more_tools=False）。
             while has_more_tools or self.inbox.has_steer():
+                # 上一枪已经 end_turn、接下来要吃 steer：那是新回合，先按 80% 压。
+                if not has_more_tools and self.inbox.has_steer():
+                    await maybe_compact(
+                        self._log, messages, tracker, llm, abort=abort
+                    )
                 self._inject_steer(messages, tracker)
                 assistant_id = self._begin_llm_step()
-                # 每次真正打模型之前才检查是否要压缩，压缩会原地重写 messages。
-                await maybe_compact(self._log, messages, tracker, llm, abort=abort)
+                # 回合中途只在下一枪会超窗时才压，好让当前回合继续吃 KV cache。
+                await maybe_compact(
+                    self._log,
+                    messages,
+                    tracker,
+                    llm,
+                    abort=abort,
+                    overflow_only=True,
+                )
                 estimated_tokens = tracker.known_tokens
                 response = await llm.call(messages, tools=TOOL_SCHEMAS, abort=abort)
                 # 真实 usage 到手，覆盖掉本地估算——两次真实调用之间的误差不会累积。
@@ -191,7 +206,8 @@ class ReactAgentLoop(AgentLoop):
                     log_llm_tools(response.tool_calls)
                     await self._handle_tool_calls(messages, response, assistant_id, tracker)
                     has_more_tools = True
-            # 内层停稳（没工具、没插队）才看有没有排队的 follow_up；有就转成 steer 重开一圈内层。
+            # 内层停稳 = 一个回合结束。按 80% 压，再决定要不要吃 follow_up。
+            await maybe_compact(self._log, messages, tracker, llm, abort=abort)
             follow = self.inbox.drain_follow_up()
             if not follow:
                 return final_text
@@ -244,7 +260,7 @@ class ReactAgentLoop(AgentLoop):
         # 先落盘 assistant 消息本身，再跑工具——即便工具执行中途进程崩溃，
         # jsonl 里已经有这条 assistant+tool_calls，recover.py 能认出该走 resume_tools。
         messages.append(assistant_msg)
-        tracker.add_estimate(assistant_msg)
+        # assistant 已经在上一枪的 completion_tokens 里，不要再 add_estimate。
         self._log.append_entry(
             "assistant",
             id=assistant_id,

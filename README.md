@@ -6,7 +6,7 @@ SwiftAgent 仓库里的代码没有改。这里只换了包名，并加了一个
 
 ## 跑起来
 
-入口：`agent_loop/__main__.py`
+入口：`python -m agent_loop`（`agent_loop/cli/app.py`）。细节见 `docs/harness.md`。
 
 ```bash
 cd /Users/wangyin/agent_loop

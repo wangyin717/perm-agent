@@ -10,8 +10,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from agent_loop.tool_runtime import ToolRuntime
-from agent_loop.tools.records import ToolResultEntry, create_error_tool_result
+from agent_loop.runtime.tool_runtime import ToolRuntime
+from agent_loop.runtime.records import ToolResultEntry, create_error_tool_result
 from agent_loop.tools.registry import get_tool
 
 

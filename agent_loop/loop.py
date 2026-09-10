@@ -14,7 +14,6 @@ import logging
 import os
 import signal
 
-import yaml
 from typing import Any, Dict, Optional
 
 from agent_loop.abort import Abort
@@ -30,17 +29,16 @@ from agent_loop.recover import (
     unfinished_assistant_id,
 )
 from agent_loop.session_log import SessionLog, session_log_path
-from agent_loop.tool_concurrency import run_tool_calls, terminate_cutoff
-from agent_loop.tool_runtime import ToolRuntime
-from agent_loop.tools.records import new_result_id
-from agent_loop.trace import log_context, log_llm_text, log_llm_tools, log_user
+from agent_loop.runtime.tool_concurrency import run_tool_calls, terminate_cutoff
+from agent_loop.runtime.tool_runtime import ToolRuntime
+from agent_loop.runtime.records import new_result_id
+from agent_loop.cli.trace import log_context, log_llm_text, log_llm_tools, log_user
 from agent_loop.deps import ExecutionDependencies
+from agent_loop.prompt import build_system_prompt
 
 _DIR = os.path.dirname(__file__)
 with open(os.path.join(_DIR, "tools", "tool_schemas.json"), encoding="utf-8") as _f:
     TOOL_SCHEMAS = json.load(_f)
-with open(os.path.join(_DIR, "prompt", "system_prompt.yaml"), encoding="utf-8") as _f:
-    SYSTEM_PROMPT = yaml.safe_load(_f)["system_prompt"]
 
 
 class AgentLoop:
@@ -132,7 +130,9 @@ class ReactAgentLoop(AgentLoop):
         # messages 是每次运行时从 jsonl 现算的投影，不是持久状态；jsonl 才是唯一权威。
         # entries_to_messages 会应用之前落盘的压缩记录（redaction / summary），
         # 所以这里拿到的已经是"压缩后应该发给模型"的样子，不是原始全量历史。
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        workspace = user_action_data.get("workspace") or os.getcwd()
+        system = build_system_prompt(workspace)
+        messages = [{"role": "system", "content": system}]
         messages.extend(entries_to_messages(self._log.read_all()))
         llm = self._get_llm()
         tracker = ContextUsageTracker(context_window=getattr(llm, "context_window", 0) or 0)
@@ -148,12 +148,20 @@ class ReactAgentLoop(AgentLoop):
         abort = Abort()
         stop_listening = _listen_sigint(abort)
         try:
-            return await self._run_outer_inner(messages, llm, abort, tracker)
+            return await self._run_outer_inner(
+                messages, llm, abort, tracker, system_content=system
+            )
         finally:
             stop_listening()
 
     async def _run_outer_inner(
-        self, messages: list, llm, abort: Abort, tracker: ContextUsageTracker
+        self,
+        messages: list,
+        llm,
+        abort: Abort,
+        tracker: ContextUsageTracker,
+        *,
+        system_content: str,
     ) -> str:
         """外层：内层停稳后才消费 follow_up。内层：每步（含 tool result）之后插入 steer。
 
@@ -168,7 +176,12 @@ class ReactAgentLoop(AgentLoop):
                 # 上一枪已经 end_turn、接下来要吃 steer：那是新回合，先按 80% 压。
                 if not has_more_tools and self.inbox.has_steer():
                     await maybe_compact(
-                        self._log, messages, tracker, llm, abort=abort
+                        self._log,
+                        messages,
+                        tracker,
+                        llm,
+                        abort=abort,
+                        system_content=system_content,
                     )
                 self._inject_steer(messages, tracker)
                 assistant_id = self._begin_llm_step()
@@ -180,6 +193,7 @@ class ReactAgentLoop(AgentLoop):
                     llm,
                     abort=abort,
                     overflow_only=True,
+                    system_content=system_content,
                 )
                 estimated_tokens = tracker.known_tokens
                 response = await llm.call(messages, tools=TOOL_SCHEMAS, abort=abort)
@@ -210,7 +224,14 @@ class ReactAgentLoop(AgentLoop):
                     await self._handle_tool_calls(messages, response, assistant_id, tracker)
                     has_more_tools = True
             # 内层停稳 = 一个回合结束。按 80% 压，再决定要不要吃 follow_up。
-            await maybe_compact(self._log, messages, tracker, llm, abort=abort)
+            await maybe_compact(
+                self._log,
+                messages,
+                tracker,
+                llm,
+                abort=abort,
+                system_content=system_content,
+            )
             follow = self.inbox.drain_follow_up()
             if not follow:
                 return final_text

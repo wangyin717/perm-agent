@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_loop.tool_runtime import ToolRuntime, _lock_path
+from agent_loop.runtime.tool_runtime import ToolRuntime, _lock_path
 from agent_loop.tools.registry import TOOLS, get_tool
 from agent_loop.tools.web_fetch_tool import (
     AFTER_TRUNCATE_CHARS,

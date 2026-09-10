@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_loop.tool_runtime import ToolRuntime
+from agent_loop.runtime.tool_runtime import ToolRuntime
 from agent_loop.tools.write_tool import REPLAY, execute
 
 

@@ -14,8 +14,8 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Sequence
 
-from agent_loop.tool_runtime import PreparedCall, ToolRuntime
-from agent_loop.tools.records import ToolResultEntry, create_error_tool_result, new_result_id
+from agent_loop.runtime.tool_runtime import PreparedCall, ToolRuntime
+from agent_loop.runtime.records import ToolResultEntry, create_error_tool_result, new_result_id
 
 
 def terminate_cutoff(results: Sequence[ToolResultEntry]) -> int:

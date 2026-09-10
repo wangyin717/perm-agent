@@ -7,7 +7,7 @@
 
 密钥：仓库根 `.env`（`DEEPSEEK_API_KEY`、`PERPLEXITY_API_KEY`），启动时 `envfile.load_dotenv()` 读入；已有环境变量不覆盖。`.env` 不进 git，`.env.example` 只有变量名。
 
-蓝图（已完成 / 要工程化 / 没做）：`doc/blueprint.html`。
+蓝图（已完成 / 要工程化 / 没做）：`docs/blueprint.html`。
 
 ---
 
@@ -38,7 +38,7 @@ messages = [system yaml] + jsonl 的 entry 投影（已应用 redaction / summar
 
 LLM 每步只有两种出口：`end_turn` 或 `tool_use`。没有 `MAX_STEPS`，和 pi 一样靠模型停；abort / 工具 `terminate` 可提前停（`terminate` 只截断喂给模型的投影，jsonl 仍记下所有已执行的结果）。
 
-人设 `prompt/system_prompt.yaml` 启动时读死，发出去前不会再拼别的块（skill 清单以后要接在这里，现在没有这步）。
+人设由 `prompt/assemble.py` 每次拼：yaml 行为稿 + 仓库根 `AGENTS.md`（若有，超过 8k 截断）+ `Current working directory` + `Today's date`。yaml 不再复述工具参数（那是 schema 的事）。skill 清单以后接在 yaml 和 AGENTS.md 之间。
 
 ---
 
@@ -92,7 +92,7 @@ end_turn 之后才进的 steer 当成**新回合**：先按 60% 做压缩，再�
 
 ## 3.1 工具并行
 
-一批 `tool_calls` 分两阶段（`tool_concurrency.py`）：
+一批 `tool_calls` 分两阶段（`runtime/tool_concurrency.py`）：
 
 ```text
 阶段一（严格串行）  逐个 before_tool + 写 tool_started
@@ -275,9 +275,8 @@ web_search 的 DuckDuckGo 在独立子进程里跑 `ddgs`，30 秒杀不掉就 S
 
 ## 10. 还没做的
 
-- skill（磁盘 SKILL.md；人设后面拼清单；不进核心工具表）  
+- skill（磁盘 SKILL.md；清单接到 assemble，不进核心工具表）  
 - 跨会话 memory（不是 jsonl，也不是压缩摘要）  
-- 拼这一枪 system 的单独步骤（现在是 loop 里两行胶水）  
 - 插件 / 浏览器 / 桌面键鼠  
 - bash 大输出落盘（现在只有 8k 截断）  
 - 同一 `reply()` 跑着时另一路 HTTP 自动入队（现在请显式 `inbox.push_steer` / `push_follow_up`）  
@@ -290,7 +289,7 @@ web_search 的 DuckDuckGo 在独立子进程里跑 `ddgs`，30 秒杀不掉就 S
 循环和五件套可以停。建议：
 
 1. 冻压缩记账格式；进场比例与文档保持同一数字（现在是 60%）  
-2. 抽出「拼 system」：yaml + 以后的 skill 清单  
+2. skill（清单接到 assemble 里，不进工具表）  
 3. skill  
 4. memory 先当仓库文件，不单独立项  
 
@@ -299,25 +298,15 @@ web_search 的 DuckDuckGo 在独立子进程里跑 `ddgs`，30 秒杀不掉就 S
 ## 文件对照
 
 ```text
-agent_loop.py         reply + _run_loop + 两层循环 + 压缩检查点
-inbox.py              steer 插队 / follow_up 排队
-abort.py              Ctrl+C → 打断 LLM 退避
-compaction.py         maybe_compact / microcompact / summary / tracker
-envfile.py            读 .env
-tool_runtime.py       call_tool；workspace + session_dir
-tool_concurrency.py   一批 tool_calls：准备串行、按路径锁并发
-session_log.py        .agent/sessions/<id>/session.jsonl
-recover.py            inspect_log + apply_recovery + 投影 messages
-tools/bash_tool.py / read_tool.py / write_tool.py / edit_tool.py
-tools/grep_tool.py    分页 + 快照
-tools/web_search_tool.py / web_search_ddgs_worker.py
-tools/web_fetch_tool.py  落盘 + 短预览
-tools/records.py      StepAttemptRecord / ToolStartedRecord / ToolResultEntry
-tools/registry.py     TOOLS
-tools/hooks.py        before/after 分发
-llm/deepseek.py       调用 + 可重试分类 + 退避
-prompt/system_prompt.yaml
-doc/blueprint.html    模块蓝图
+prompt/assemble.py      拼 system（yaml + AGENTS.md + cwd + 日期）
+loop.py                 两层循环 + 压缩检查点
+inbox.py / abort.py / compaction.py / recover.py / session_log.py / envfile.py
+runtime/                工单、并行、hook 分发、records
+tools/                  模型能调的工具 + registry + schemas
+llm/  prompt/
+cli/app.py              命令行入口
+cli/trace.py            终端过程日志
+docs/blueprint.html     模块蓝图
 ```
 
 独立入口：`python -m agent_loop -s <id> "<问题>"`。

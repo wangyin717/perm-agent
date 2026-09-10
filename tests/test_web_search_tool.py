@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_loop.tool_runtime import ToolRuntime
+from agent_loop.runtime.tool_runtime import ToolRuntime
 from agent_loop.tools.registry import TOOLS, get_tool
 from agent_loop.tools.web_search_tool import (
     AFTER_TRUNCATE_CHARS,

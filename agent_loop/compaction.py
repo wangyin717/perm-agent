@@ -28,7 +28,7 @@ from agent_loop.recover import (
 )
 from agent_loop.session_log import SessionLog
 from agent_loop.tools.registry import get_tool
-from agent_loop.trace import log_compaction, summarize_args
+from agent_loop.cli.trace import log_compaction, summarize_args
 
 TRIGGER_RATIO = 0.60  # 回合结束：低于这条线不改已经发出去的前缀
 OVERFLOW_RATIO = 1.00  # 回合中途：下一枪估算达到窗口才压
@@ -127,14 +127,26 @@ def estimate_tokens(obj: Any) -> int:
     return max(len(text) // 4, 0)
 
 
-def _reproject(messages: list, log: SessionLog, tracker: ContextUsageTracker) -> None:
-    """压缩落盘后重新投影。保留 messages 开头连续的 system，避免把系统提示弄丢。"""
-    leading = []
-    for msg in messages:
-        if msg.get("role") == "system":
-            leading.append(msg)
-        else:
-            break
+def _reproject(
+    messages: list,
+    log: SessionLog,
+    tracker: ContextUsageTracker,
+    system_content: Optional[str] = None,
+) -> None:
+    """压缩落盘后重新投影。
+
+    有 system_content 就用它当唯一一条 system（和 loop 组装口同一套）。
+    没有则保留 messages 开头连续的 system，给单测用。
+    """
+    if system_content is not None:
+        leading = [{"role": "system", "content": system_content}]
+    else:
+        leading = []
+        for msg in messages:
+            if msg.get("role") == "system":
+                leading.append(msg)
+            else:
+                break
     messages[:] = leading + entries_to_messages(log.read_all())
     tracker.bootstrap(messages)
 
@@ -147,6 +159,7 @@ async def maybe_compact(
     abort: Optional[Abort] = None,
     *,
     overflow_only: bool = False,
+    system_content: Optional[str] = None,
 ) -> bool:
     """压缩的唯一入口。
 
@@ -176,7 +189,7 @@ async def maybe_compact(
 
     cleared = run_microcompact(log, log.read_all(), tracker.context_window)
     if cleared > 0:
-        _reproject(messages, log, tracker)
+        _reproject(messages, log, tracker, system_content=system_content)
         changed = True
         log_compaction("microcompact", ratio, tracker.usage_ratio())
         logging.info(
@@ -196,7 +209,7 @@ async def maybe_compact(
         log, log.read_all(), llm, tracker.context_window, abort=abort
     )
     if summarized:
-        _reproject(messages, log, tracker)
+        _reproject(messages, log, tracker, system_content=system_content)
         changed = True
         log_compaction("summary", before_summary, tracker.usage_ratio())
         logging.info(

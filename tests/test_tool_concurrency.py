@@ -4,15 +4,15 @@ from __future__ import annotations
 import asyncio
 import json
 
-from agent_loop.agent_loop import ReactAgentLoop
+from agent_loop.loop import ReactAgentLoop
 from agent_loop.compaction import ContextUsageTracker
 from agent_loop.llm import LLMResponse
 from agent_loop.recover import entries_to_messages, inspect_log
 from agent_loop.session_log import SessionLog
-from agent_loop.tool_concurrency import run_tool_calls, terminate_cutoff
-from agent_loop.tool_runtime import ToolRuntime
+from agent_loop.runtime.tool_concurrency import run_tool_calls, terminate_cutoff
+from agent_loop.runtime.tool_runtime import ToolRuntime
 from agent_loop.tools import bash_tool, read_tool, write_tool
-from agent_loop.tools.records import ToolResultEntry
+from agent_loop.runtime.records import ToolResultEntry
 
 
 def _call(call_id, name, arguments):

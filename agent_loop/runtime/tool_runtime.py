@@ -10,16 +10,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent_loop.session_log import SessionLog
-from agent_loop.tools.hooks import Hooks
+from agent_loop.runtime.hooks import Hooks
 from agent_loop.tools.read_tool import resolve_path
-from agent_loop.tools.records import (
+from agent_loop.runtime.records import (
     ToolResultEntry,
     ToolStartedRecord,
     create_error_tool_result,
     new_result_id,
 )
 from agent_loop.tools.registry import available_tool_names, get_tool
-from agent_loop.trace import log_tool_result
+from agent_loop.cli.trace import log_tool_result
 
 
 @dataclass

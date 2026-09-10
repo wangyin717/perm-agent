@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.scripts]
-agent-loop = "agent_loop.__main__:main"
+agent-loop = "agent_loop.cli.app:main"
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -20,4 +20,4 @@ build-backend = "setuptools.build_meta"
 include = ["agent_loop*"]
 
 [tool.setuptools.package-data]
-agent_loop = ["prompt/*.yaml", "tools/*.json", "doc/*"]
+agent_loop = ["prompt/*.yaml", "tools/*.json"]

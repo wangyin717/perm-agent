@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 
-from agent_loop.tool_runtime import ToolRuntime
+from agent_loop.runtime.tool_runtime import ToolRuntime
 from agent_loop.tools.edit_tool import REPLAY, execute
 
 

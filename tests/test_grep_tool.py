@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from agent_loop.session_log import SessionLog, session_log_path
-from agent_loop.tool_runtime import ToolRuntime
+from agent_loop.runtime.tool_runtime import ToolRuntime
 from agent_loop.tools.grep_tool import PAGE_SIZE, REPLAY, execute
 
 _CURSOR = re.compile(r'cursor="(g1\.[0-9a-f]{12}\.\d+)"')

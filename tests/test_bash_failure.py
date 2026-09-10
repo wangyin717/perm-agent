@@ -7,11 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_loop.agent_loop import ReactAgentLoop
+from agent_loop.loop import ReactAgentLoop
 from agent_loop.llm import LLMResponse
 from agent_loop.recover import inspect_log
 from agent_loop.session_log import SessionLog, session_log_path
-from agent_loop.tool_runtime import ToolRuntime
+from agent_loop.runtime.tool_runtime import ToolRuntime
 from agent_loop.tools.bash_tool import run_bash
 
 

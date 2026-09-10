@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from agent_loop.agent_loop import ReactAgentLoop
+from agent_loop.loop import ReactAgentLoop
 from agent_loop.compaction import (
     KEEP_TAIL_RATIO,
     OVERFLOW_RATIO,
@@ -22,7 +22,7 @@ from agent_loop.compaction import (
 from agent_loop.llm.deepseek import LLMResponse
 from agent_loop.recover import entries_to_messages
 from agent_loop.session_log import SessionLog, session_log_path
-from agent_loop.tools.records import ToolResultEntry
+from agent_loop.runtime.records import ToolResultEntry
 
 
 class ScriptedSummaryLLM:
@@ -387,6 +387,18 @@ def test_maybe_compact_preserves_system_prompt(tmp_path):
     assert messages[0] == {"role": "system", "content": "sys"}
 
 
+def test_maybe_compact_rebuilds_system_when_given(tmp_path):
+    log = _log(tmp_path)
+    messages, tracker = _over_trigger_log(log)
+    llm = ScriptedSummaryLLM(["## Goal\nkeep system"])
+    asyncio.run(
+        maybe_compact(
+            log, messages, tracker, llm, system_content="assembled sys"
+        )
+    )
+    assert messages[0] == {"role": "system", "content": "assembled sys"}
+
+
 def test_maybe_compact_empty_summary_keeps_micro_progress(tmp_path):
     log = _log(tmp_path)
     messages, tracker = _over_trigger_log(log)
@@ -421,7 +433,7 @@ def test_handle_tool_calls_does_not_double_count_assistant(tmp_path):
 
     class _StubRuntime:
         async def _prepare_call(self, tool_call):
-            from agent_loop.tool_runtime import PreparedCall
+            from agent_loop.runtime.tool_runtime import PreparedCall
 
             return PreparedCall(
                 tool_call=tool_call,

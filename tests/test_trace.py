@@ -1,4 +1,4 @@
-from agent_loop.trace import (
+from agent_loop.cli.trace import (
     format_context_usage,
     format_token_count,
     format_tool_line,

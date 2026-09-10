@@ -9,6 +9,7 @@ import os
 from datetime import datetime
 
 from agent_loop.agent_loop import ReactAgentLoop
+from agent_loop.envfile import load_dotenv
 from agent_loop.trace import log_session
 
 
@@ -23,17 +24,18 @@ async def _amain(query: str, session_id: str) -> str:
         "sessionId": session_id,
         "workspace": os.getcwd(),
     }
-    log_session(session_id, f".agent/sessions/{session_id}.jsonl")
+    log_session(session_id, f".agent/sessions/{session_id}/session.jsonl")
     return await loop._run_loop(query, user_action_data)
 
 
 def main() -> None:
+    load_dotenv()
     parser = argparse.ArgumentParser(description="独立 agent loop")
     parser.add_argument(
         "-s",
         "--session",
         default=None,
-        help="会话 id，日志写到 .agent/sessions/<id>.jsonl；不传则每次新建",
+        help="会话 id，日志写到 .agent/sessions/<id>/session.jsonl；不传则每次新建",
     )
     parser.add_argument("query", nargs="*", help="用户问题")
     args = parser.parse_args()

@@ -14,8 +14,6 @@ import aiohttp
 
 from agent_loop.abort import Abort, RetryCancelledError
 
-# FIXME: 临时本地联调用，正式环境请改成只读环境变量
-API_KEY = "sk-a6c363b264d342a8bd3e62fb67b03a1e"
 API_BASE = "https://api.deepseek.com"
 MODEL = "deepseek-v4-flash"
 CONTEXT_WINDOWS = {
@@ -110,7 +108,9 @@ class DeepSeekLLM:
         api_base: Optional[str] = None,
         timeout: float = 120,
     ):
-        self.api_key = api_key or API_KEY
+        self.api_key = (api_key or os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+        if not self.api_key:
+            raise RuntimeError("DEEPSEEK_API_KEY is not set (put it in .env)")
         self.model = model or MODEL
         self.api_base = (api_base or API_BASE).rstrip("/")
         self.timeout = timeout

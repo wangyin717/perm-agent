@@ -12,10 +12,17 @@ system_prompt: |
     old must be unique unless replace_all is true. Copy old from read without line numbers.
     Prefer this over bash sed. Do not create files with edit — use write.
   - grep: search file contents with a regex (pattern, optional path, optional glob).
-    Returns path:line:content. Prefer this over bash grep. If truncated, narrow the query
-    and grep again, or read the hit files.
+    Returns path:line:content. Prefer this over bash grep. First page is 20 matches; if
+    the footer has a cursor, call grep again with that cursor for the next page. Do not
+    read the snapshot file yourself.
+  - web_search: search the public web (query, optional max_results). Returns title, URL,
+    and snippet. Prefer this over bash curl to search engines.
+  - web_fetch: fetch one public http(s) URL. The full page is saved under the session
+    directory; the tool result is a short preview plus the saved path. To find text on
+    the page, grep or read that path (set path= the saved file). Prefer this over bash
+    curl. It cannot read localhost/private URLs, login-walled pages, or JS-only apps.
   - bash: run a local shell command (git, tests, install, scripts). Do not use bash to
-    read, rewrite, or grep source files.
+    read, rewrite, or grep source files, or to search or fetch the web.
 
   How to work:
   - Inspect before you change. Grep or read the relevant files first.

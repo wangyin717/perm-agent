@@ -40,7 +40,7 @@ BEFORE_HOOKS = [before_tool_deny_empty_path]
 AFTER_HOOKS = [after_tool_truncate_output]
 
 
-async def execute(args: Dict[str, Any], sandbox=None, workspace=None) -> str:
+async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_dir=None) -> str:
     path = (args.get("path") or "").strip()
     if not path:
         raise ValueError("path 为空")

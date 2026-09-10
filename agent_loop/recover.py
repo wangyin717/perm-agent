@@ -354,7 +354,10 @@ async def _replay_one(runtime: ToolRuntime, item: UnfinishedTool, sandbox=None) 
     logging.info("[recover] replay tool=%s result_id=%s", item.tool_name, item.result_id)
     try:
         content = await tool.execute(
-            item.effective_args, sandbox, workspace=getattr(runtime, "workspace", None)
+            item.effective_args,
+            sandbox,
+            workspace=getattr(runtime, "workspace", None),
+            session_dir=getattr(runtime, "session_dir", None),
         )
         is_error = False
     except Exception as exc:

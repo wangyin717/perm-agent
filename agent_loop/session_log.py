@@ -1,4 +1,4 @@
-"""本地会话日志：workspace/.agent/sessions/<session_id>.jsonl
+"""本地会话日志：workspace/.agent/sessions/<session_id>/session.jsonl
 
 一行一次写入。两种 kind：
   record — 执行意图（tool_started），不进模型上下文
@@ -18,7 +18,7 @@ def session_log_path(user_action_data: Dict[str, Any]) -> Path:
     session_id = str(user_action_data.get("sessionId") or "default")
     # 有 workspace 就写到工程里；没有则退回当前目录（本地直接跑 loop）
     root = user_action_data.get("workspace") or os.getcwd()
-    return Path(root) / ".agent" / "sessions" / f"{session_id}.jsonl"
+    return Path(root) / ".agent" / "sessions" / session_id / "session.jsonl"
 
 
 class SessionLog:

@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional
 
 from agent_loop.abort import Abort
 from agent_loop.compaction import ContextUsageTracker, maybe_compact
+from agent_loop.envfile import load_dotenv
 from agent_loop.inbox import UserInbox
 from agent_loop.llm import DeepSeekLLM
 from agent_loop.recover import (
@@ -100,6 +101,7 @@ class ReactAgentLoop(AgentLoop):
 
     def _get_llm(self) -> DeepSeekLLM:
         if self._llm is None:
+            load_dotenv()
             self._llm = DeepSeekLLM()
         return self._llm
 

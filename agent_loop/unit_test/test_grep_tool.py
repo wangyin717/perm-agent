@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
+from pathlib import Path
 
 import pytest
 
+from agent_loop.session_log import SessionLog, session_log_path
 from agent_loop.tool_runtime import ToolRuntime
-from agent_loop.tools.grep_tool import MAX_SHOWN, REPLAY, execute
+from agent_loop.tools.grep_tool import PAGE_SIZE, REPLAY, execute
+
+_CURSOR = re.compile(r'cursor="(g1\.[0-9a-f]{12}\.\d+)"')
 
 
 @pytest.fixture(autouse=True)
@@ -60,15 +66,61 @@ def test_grep_invalid_regex(tmp_path):
         asyncio.run(execute({"pattern": "("}, workspace=str(tmp_path)))
 
 
-def test_grep_truncates_with_total(tmp_path):
-    lines = [f"needle {i}" for i in range(MAX_SHOWN + 10)]
+def test_grep_paginates_from_snapshot(tmp_path):
+    session_dir = str(tmp_path / ".agent" / "sessions" / "s1")
+    total = PAGE_SIZE + 10
+    lines = [f"needle {i}" for i in range(total)]
     (tmp_path / "a.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    out = asyncio.run(execute({"pattern": "needle"}, workspace=str(tmp_path)))
-    assert f"a.py:1:needle 0" in out
-    assert f"a.py:{MAX_SHOWN}:needle {MAX_SHOWN - 1}" in out
-    assert f"a.py:{MAX_SHOWN + 1}:needle {MAX_SHOWN}" not in out
-    assert f"[Showing {MAX_SHOWN} of {MAX_SHOWN + 10} matches." in out
-    assert "Narrow path, glob, or pattern.]" in out
+    out = asyncio.run(
+        execute({"pattern": "needle"}, workspace=str(tmp_path), session_dir=session_dir)
+    )
+    assert "a.py:1:needle 0" in out
+    assert f"a.py:{PAGE_SIZE}:needle {PAGE_SIZE - 1}" in out
+    assert f"a.py:{PAGE_SIZE + 1}:needle {PAGE_SIZE}" not in out
+    assert f"[Showing {PAGE_SIZE} of {total} matches." in out
+    matched = _CURSOR.search(out)
+    assert matched, out
+    cursor = matched.group(1)
+    grep_dir = Path(session_dir) / "workspace" / "tools_result" / "grep"
+    assert list(grep_dir.iterdir())
+
+    page2 = asyncio.run(
+        execute({"cursor": cursor}, workspace=str(tmp_path), session_dir=session_dir)
+    )
+    assert f"a.py:{PAGE_SIZE + 1}:needle {PAGE_SIZE}" in page2
+    assert "a.py:1:needle 0" not in page2
+    assert "Continue with cursor" not in page2
+    assert f"[Showing 10 of {total} matches]" in page2
+
+
+def test_grep_cursor_pattern_mismatch(tmp_path):
+    session_dir = str(tmp_path / ".agent" / "sessions" / "s1")
+    (tmp_path / "a.py").write_text("\n".join(f"needle {i}" for i in range(25)) + "\n", encoding="utf-8")
+    out = asyncio.run(
+        execute({"pattern": "needle"}, workspace=str(tmp_path), session_dir=session_dir)
+    )
+    cursor = _CURSOR.search(out).group(1)
+    with pytest.raises(ValueError, match="does not match pattern"):
+        asyncio.run(
+            execute(
+                {"pattern": "other", "cursor": cursor},
+                workspace=str(tmp_path),
+                session_dir=session_dir,
+            )
+        )
+
+
+def test_grep_bad_cursor(tmp_path):
+    session_dir = str(tmp_path / ".agent" / "sessions" / "s1")
+    with pytest.raises(ValueError, match="bad cursor"):
+        asyncio.run(
+            execute({"cursor": "nope"}, workspace=str(tmp_path), session_dir=session_dir)
+        )
+
+
+def test_session_log_path_layout(tmp_path):
+    path = session_log_path({"sessionId": "wy1", "workspace": str(tmp_path)})
+    assert path == tmp_path / ".agent" / "sessions" / "wy1" / "session.jsonl"
 
 
 def test_grep_path_file(tmp_path):
@@ -125,3 +177,36 @@ def test_runtime_empty_pattern_blocked(tmp_path, monkeypatch):
     )
     assert result.is_error is True
     assert "pattern 为空" in result.content
+
+
+def test_runtime_cursor_only_next_page(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.py").write_text(
+        "\n".join(f"needle {i}" for i in range(25)) + "\n", encoding="utf-8"
+    )
+    runtime = ToolRuntime()
+    runtime.workspace = str(tmp_path)
+    runtime.attach_log(
+        SessionLog(session_log_path({"sessionId": "s1", "workspace": str(tmp_path)}))
+    )
+    first = asyncio.run(
+        runtime.call_tool(
+            {
+                "id": "c1",
+                "function": {"name": "grep", "arguments": '{"pattern": "needle"}'},
+            }
+        )
+    )
+    assert first.is_error is False
+    cursor = _CURSOR.search(first.content).group(1)
+    second = asyncio.run(
+        runtime.call_tool(
+            {
+                "id": "c2",
+                "function": {"name": "grep", "arguments": json.dumps({"cursor": cursor})},
+            }
+        )
+    )
+    assert second.is_error is False
+    assert "needle 20" in second.content
+    assert "needle 0" not in second.content

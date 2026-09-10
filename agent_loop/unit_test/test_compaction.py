@@ -109,7 +109,7 @@ def _over_trigger_log(log, rounds=10, content_len=2000, window=4000):
 
 
 def test_threshold_constants():
-    assert TRIGGER_RATIO == 0.80
+    assert TRIGGER_RATIO == 0.60
     assert OVERFLOW_RATIO == 1.00
     assert SUCCESS_RATIO == 0.30
     assert KEEP_TAIL_RATIO == 0.10

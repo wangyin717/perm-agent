@@ -95,13 +95,13 @@
     "type": "function",
     "function": {
       "name": "grep",
-      "description": "Search file contents with a regex. Returns path:line:content. Optional path (file or directory, default workspace) and glob (e.g. *.py). Prefer this over bash grep. Results are capped; if truncated, narrow path, glob, or pattern. Do not use this to read whole files — use read.",
+      "description": "Search file contents with a regex. Returns path:line:content. Optional path (file or directory, default workspace) and glob (e.g. *.py). Prefer this over bash grep. First page is 20 matches; if the footer includes cursor, call grep again with that cursor to get the next page. Do not use this to read whole files — use read.",
       "parameters": {
         "type": "object",
         "properties": {
           "pattern": {
             "type": "string",
-            "description": "Regular expression to search for"
+            "description": "Regular expression to search for. Required unless cursor is set."
           },
           "path": {
             "type": "string",
@@ -110,9 +110,50 @@
           "glob": {
             "type": "string",
             "description": "Only search files matching this glob, e.g. *.py or *.{ts,tsx}"
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Pagination token from a previous grep. Pass it to get the next page of the same search."
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "web_search",
+      "description": "Search the web for up-to-date information. Returns a ranked list of title, URL, and snippet. Prefer this over bash curl to search engines. If you need a specific page's full text, that is a later step — this tool only searches.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query"
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "How many results to return (default 5, max 10)"
           }
         },
-        "required": ["pattern"]
+        "required": ["query"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "web_fetch",
+      "description": "Fetch a public http(s) URL. HTML becomes readable text and the full page is saved to a session file. The tool result is a short preview plus the saved path — grep or read that path (set path= the file) to find content. Use when the user pastes a link or a search hit needs the page body. Fails for private/localhost URLs, login walls, PDFs, and JavaScript-only apps. Prefer this over bash curl.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The URL to fetch. http is upgraded to https."
+          }
+        },
+        "required": ["url"]
       }
     }
   }

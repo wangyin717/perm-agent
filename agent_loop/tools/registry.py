@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from agent_loop.tools import bash_tool, edit_tool, grep_tool, read_tool, write_tool
+from agent_loop.tools import (
+    bash_tool,
+    edit_tool,
+    grep_tool,
+    read_tool,
+    web_fetch_tool,
+    web_search_tool,
+    write_tool,
+)
 
 TOOLS = {
     bash_tool.NAME: bash_tool,
@@ -12,6 +20,8 @@ TOOLS = {
     write_tool.NAME: write_tool,
     edit_tool.NAME: edit_tool,
     grep_tool.NAME: grep_tool,
+    web_search_tool.NAME: web_search_tool,
+    web_fetch_tool.NAME: web_fetch_tool,
 }
 
 

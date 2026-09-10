@@ -30,7 +30,7 @@ from agent_loop.session_log import SessionLog
 from agent_loop.tools.registry import get_tool
 from agent_loop.trace import log_compaction, summarize_args
 
-TRIGGER_RATIO = 0.80  # 回合结束：低于这条线不改已经发出去的前缀
+TRIGGER_RATIO = 0.60  # 回合结束：低于这条线不改已经发出去的前缀
 OVERFLOW_RATIO = 1.00  # 回合中途：下一枪估算达到窗口才压
 SUCCESS_RATIO = 0.30  # 压到这条线以下就收工
 KEEP_TAIL_RATIO = 0.10  # 最近这段完整轮次原样保留（窗口占比，对齐到 user 边界）

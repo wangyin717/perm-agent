@@ -40,7 +40,7 @@ def _bash_call(call_id, cmd):
 def _patch_execute(module, inflight, max_inflight, delay=0.05):
     original = module.execute
 
-    async def wrapped(args, sandbox=None, workspace=None):
+    async def wrapped(args, sandbox=None, workspace=None, session_dir=None):
         inflight.append(1)
         max_inflight[0] = max(max_inflight[0], sum(inflight))
         try:
@@ -157,7 +157,7 @@ def test_prepare_block_skips_execute(tmp_path):
     executed = []
     original = write_tool.execute
 
-    async def wrapped(args, sandbox=None, workspace=None):
+    async def wrapped(args, sandbox=None, workspace=None, session_dir=None):
         executed.append(args.get("path"))
         return await original(args, sandbox, workspace)
 
@@ -188,7 +188,7 @@ def test_terminate_runs_all_but_truncates_messages(tmp_path):
     executed = []
     original = write_tool.execute
 
-    async def wrapped(args, sandbox=None, workspace=None):
+    async def wrapped(args, sandbox=None, workspace=None, session_dir=None):
         executed.append(args["path"])
         return await original(args, sandbox, workspace)
 

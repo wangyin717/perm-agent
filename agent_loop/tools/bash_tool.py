@@ -37,7 +37,7 @@ AFTER_HOOKS = [
 ]
 
 
-async def execute(args: Dict[str, Any], sandbox=None, workspace=None) -> str:
+async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_dir=None) -> str:
     cmd = args.get("cmd") or args.get("command") or ""
     return await run_bash(cmd, sandbox)
 

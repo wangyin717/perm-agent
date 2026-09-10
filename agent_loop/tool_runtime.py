@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent_loop.session_log import SessionLog
@@ -41,9 +42,11 @@ class ToolRuntime:
         self.tool_result_records: List[ToolResultEntry] = []
         self._log: Optional[SessionLog] = None
         self.workspace: Optional[str] = None
+        self.session_dir: Optional[str] = None
 
     def attach_log(self, log: Optional[SessionLog]) -> None:
         self._log = log
+        self.session_dir = str(Path(log.path).parent) if log is not None else None
 
     async def call_tool(self, tool_call: Dict[str, Any], sandbox=None) -> ToolResultEntry:
         """一次工具调用的完整流水线。recover 仍走这条单次入口。"""
@@ -128,7 +131,10 @@ class ToolRuntime:
         name = prepared.name
         try:
             content = await tool.execute(
-                started.effective_args, sandbox, workspace=self.workspace
+                started.effective_args,
+                sandbox,
+                workspace=self.workspace,
+                session_dir=self.session_dir,
             )
             is_error = False
         except Exception as exc:

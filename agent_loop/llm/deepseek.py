@@ -8,7 +8,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 import aiohttp
 
@@ -137,12 +137,13 @@ class DeepSeekLLM:
         if kwargs.get("max_tokens") is not None:
             payload["max_tokens"] = kwargs["max_tokens"]
 
+        on_delta: Optional[Callable[[str], None]] = kwargs.get("on_delta")
         last_exc: Optional[BaseException] = None
         for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
             if abort and abort.aborted:
                 raise RetryCancelledError()
             try:
-                chunks = await self._stream(payload, abort)
+                chunks = await self._stream(payload, abort, on_delta=on_delta)
                 return parse_stream_chunks(chunks)
             except RetryCancelledError:
                 # Ctrl+C 打断的，不算"可重试的服务端错误"，直接向上传播。
@@ -166,12 +167,15 @@ class DeepSeekLLM:
         raise last_exc  # pragma: no cover
 
     async def _stream(
-        self, payload: Dict[str, Any], abort: Optional[Abort] = None
+        self,
+        payload: Dict[str, Any],
+        abort: Optional[Abort] = None,
+        on_delta: Optional[Callable[[str], None]] = None,
     ) -> List[Dict[str, Any]]:
         """让真正的 HTTP 请求和"等待 abort"赛跑，谁先完成就取消另一个——
         这样 Ctrl+C 能立刻打断一个卡住的流式请求，而不用等 aiohttp 超时。
         """
-        stream_task = asyncio.create_task(self._stream_once(payload))
+        stream_task = asyncio.create_task(self._stream_once(payload, on_delta=on_delta))
         if abort is None:
             return await stream_task
         abort_task = asyncio.create_task(abort.wait())
@@ -185,7 +189,11 @@ class DeepSeekLLM:
             raise RetryCancelledError()
         return stream_task.result()
 
-    async def _stream_once(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    async def _stream_once(
+        self,
+        payload: Dict[str, Any],
+        on_delta: Optional[Callable[[str], None]] = None,
+    ) -> List[Dict[str, Any]]:
         url = f"{self.api_base}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -201,7 +209,18 @@ class DeepSeekLLM:
                     resp.raise_for_status()
                 async for obj in _iter_sse_json(resp):
                     chunks.append(obj)
+                    if on_delta:
+                        _emit_text_delta(obj, on_delta)
         return chunks
+
+
+def _emit_text_delta(obj: Dict[str, Any], on_delta: Callable[[str], None]) -> None:
+    choices = obj.get("choices") or []
+    if not choices:
+        return
+    content = ((choices[0] or {}).get("delta") or {}).get("content")
+    if content:
+        on_delta(content)
 
 
 async def _abortable_sleep(seconds: float, abort: Optional[Abort]) -> None:

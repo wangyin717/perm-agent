@@ -14,7 +14,7 @@ source .venv/bin/activate
 PYTHONPATH=. python -m agent_loop -s wy1 "随便写一段 python 并运行一下"
 ```
 
-`-s / --session` 指定会话，机器日志在 `.agent/sessions/<id>/session.jsonl`。不传则每次新建 `cli-时间戳`。
+`-s / --session` 指定会话，日志在 `~/.spark-agent/projects/<项目>-<hash>/chats/<id>/session.jsonl`。不传则每次新建 `cli-时间戳`。可用 `SPARK_AGENT_HOME` 改家目录。
 
 终端过程按对话分段打印：
 

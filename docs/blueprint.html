@@ -309,12 +309,13 @@
 
     <section>
       <h2>会话目录</h2>
-      <pre class="tree">.agent/sessions/&lt;id&gt;/
-├── session.jsonl                          <span class="c">← 对话账本（恢复 / 压缩 / 投影）</span>
-└── workspace/
-    └── tools_result/
-        ├── grep/&lt;12位hex&gt;                 <span class="c">← 一次搜索的完整命中，cursor 读它</span>
-        └── web_fetch/&lt;12位hex&gt;            <span class="c">← 一页全文，模型 grep/read 这条路径</span></pre>
+      <pre class="tree">~/.spark-agent/
+├── MEMORY.md                              <span class="c">← 全局长期（memory 模块再用）</span>
+└── projects/{slug}-{hash}/
+    ├── memory/                            <span class="c">← 仓库 MEMORY.md + 中期 md</span>
+    └── chats/{sessionId}/
+        ├── session.jsonl                  <span class="c">← 对话账本</span>
+        └── workspace/tools_result/        <span class="c">← grep / fetch 快照</span></pre>
     </section>
 
     <section>

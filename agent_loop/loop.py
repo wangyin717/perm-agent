@@ -33,8 +33,10 @@ from agent_loop.runtime.tool_concurrency import run_tool_calls, terminate_cutoff
 from agent_loop.runtime.tool_runtime import ToolRuntime
 from agent_loop.runtime.records import new_result_id
 from agent_loop.cli.trace import log_context, log_llm_text, log_llm_tools, log_user
+from agent_loop.events import emit as emit_event
 from agent_loop.deps import ExecutionDependencies
 from agent_loop.prompt import build_system_prompt
+from agent_loop.memory import maybe_dream, maybe_flush
 
 _DIR = os.path.dirname(__file__)
 with open(os.path.join(_DIR, "tools", "tool_schemas.json"), encoding="utf-8") as _f:
@@ -84,6 +86,7 @@ class ReactAgentLoop(AgentLoop):
         self.runtime = ToolRuntime()
         self._log: Optional[SessionLog] = None
         self.inbox = UserInbox()
+        self._abort: Optional[Abort] = None
 
     @property
     def hooks(self):
@@ -146,13 +149,30 @@ class ReactAgentLoop(AgentLoop):
             tracker.context_window,
         )
         abort = Abort()
-        stop_listening = _listen_sigint(abort)
+        self._abort = abort
+        stop_listening = (
+            _listen_sigint(abort) if user_action_data.get("install_sigint", True) else (lambda: None)
+        )
+        session_id = str(user_action_data.get("sessionId") or "default")
         try:
-            return await self._run_outer_inner(
+            result = await self._run_outer_inner(
                 messages, llm, abort, tracker, system_content=system
             )
+            if not abort.aborted:
+                await maybe_flush(
+                    self._log,
+                    llm,
+                    workspace,
+                    session_id,
+                    abort,
+                    user_query=user_query,
+                )
+                await maybe_dream(llm, workspace, abort, user_query=user_query, session_id=session_id)
+            return result
         finally:
             stop_listening()
+            if self._abort is abort:
+                self._abort = None
 
     async def _run_outer_inner(
         self,
@@ -196,7 +216,12 @@ class ReactAgentLoop(AgentLoop):
                     system_content=system_content,
                 )
                 estimated_tokens = tracker.known_tokens
-                response = await llm.call(messages, tools=TOOL_SCHEMAS, abort=abort)
+                response = await llm.call(
+                    messages,
+                    tools=TOOL_SCHEMAS,
+                    abort=abort,
+                    on_delta=lambda t: emit_event("assistant_delta", text=t),
+                )
                 # 真实 usage 到手，覆盖掉本地估算——两次真实调用之间的误差不会累积。
                 tracker.update_from_response(response)
                 if response.prompt_tokens:

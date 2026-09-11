@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>spark-agent TUI mock — Grok-style</title>
+  <style>
+    :root {
+      --bg: #f4f4f5;
+      --user: #e8e8ea;
+      --text: #1c1c1e;
+      --muted: #6e6e73;
+      --line: #d2d2d7;
+      --read: #1c1c1e;
+      --edit: #c2410c;
+      --search: #1c1c1e;
+      --code-del: #fce8e6;
+      --code-add: #e6f4ea;
+      --code-fg: #3c4043;
+      --link: #1a73e8;
+      --kw: #1967d2;
+      --imp: #c5221f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #ececee;
+      color: var(--text);
+      font: 14.5px/1.55 ui-sans-serif, "SF Pro Text", "PingFang SC", sans-serif;
+      padding: 24px 16px 40px;
+    }
+    .wrap { max-width: 920px; margin: 0 auto; }
+    .term {
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      min-height: 640px;
+      display: flex;
+      flex-direction: column;
+    }
+    .chrome {
+      font-size: 12px;
+      color: var(--muted);
+      padding: 8px 14px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      gap: 12px;
+    }
+    .chrome strong { color: var(--text); font-weight: 600; }
+    .scroll { flex: 1; padding: 0 0 16px; }
+    .user {
+      background: var(--user);
+      padding: 12px 18px 12px 16px;
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      border-bottom: 1px solid #ddd;
+    }
+    .user .chev { color: var(--muted); font-weight: 700; margin-top: 1px; }
+    .turn { padding: 12px 20px 8px 22px; }
+    .thought, .tool {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      margin: 6px 0;
+      font-size: 13.5px;
+    }
+    .diamond { color: var(--muted); font-size: 11px; margin-top: 4px; width: 12px; flex: none; }
+    .thought .body { color: var(--muted); }
+    .tool .body { color: var(--text); }
+    .tool .verb { font-weight: 700; }
+    .tool .verb.edit { color: var(--edit); }
+    .tool .path { font-weight: 600; }
+    .tool .dim { color: var(--muted); font-weight: 400; }
+    .prose { margin: 10px 0 12px; }
+    .prose p { margin: 0 0 8px; }
+    .prose code {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 13px;
+      color: var(--kw);
+    }
+    .diff {
+      margin: 6px 0 10px 20px;
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 12.5px;
+      line-height: 1.45;
+      color: var(--code-fg);
+    }
+    .diff .ln { display: inline-block; width: 28px; color: #9aa0a6; text-align: right; margin-right: 10px; }
+    .diff .del { background: var(--code-del); }
+    .diff .add { background: var(--code-add); }
+    .diff .kw { color: var(--kw); }
+    .diff .imp { color: var(--imp); }
+    .status {
+      border-top: 1px solid var(--line);
+      padding: 6px 16px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .input {
+      display: flex;
+      gap: 8px;
+      padding: 10px 14px 14px;
+      border-top: 1px solid var(--line);
+      background: #fff;
+    }
+    .input span { color: var(--muted); font-weight: 700; }
+    .input div {
+      flex: 1;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      color: #aaa;
+    }
+    .note { margin-top: 14px; font-size: 13px; color: #6e6e73; line-height: 1.55; }
+    .note code { font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="term">
+      <div class="chrome">
+        <strong>spark-agent</strong>
+        <span>wy_debug</span>
+        <span style="margin-left:auto">layout mock · Grok-style</span>
+      </div>
+      <div class="scroll">
+        <div class="user">
+          <div class="chev">›</div>
+          <div>我们现在来优化一下 TUI 体验吧，首先是输入 query 后，就看不到 query 了，体验不好，然后是调用工具的过程（也就是用户看到的模型思考的过程）没有显示到 TUI，最后就是流式输出问题</div>
+        </div>
+        <div class="turn">
+          <div class="thought">
+            <div class="diamond">◆</div>
+            <div class="body">Thought for 5.0s</div>
+          </div>
+          <div class="prose">
+            <p>先看 TUI 怎么收事件、query 和工具结果在哪丢的，以及 LLM 流式有没有出口。</p>
+          </div>
+
+          <div class="tool">
+            <div class="diamond">◆</div>
+            <div class="body"><span class="verb">Read</span> 8 files, <span class="verb">Searched</span> 2 patterns</div>
+          </div>
+          <div class="tool">
+            <div class="diamond">◆</div>
+            <div class="body"><span class="verb">Read</span> <span class="path">tui.py</span></div>
+          </div>
+          <div class="tool">
+            <div class="diamond">◆</div>
+            <div class="body"><span class="verb">Search</span> <span class="dim">"log_user|log_llm|log_tool|emit\(" in **/*.py</span></div>
+          </div>
+          <div class="tool">
+            <div class="diamond">◆</div>
+            <div class="body"><span class="verb">Read</span> <span class="path">deepseek.py</span> <span class="dim">(141-220 of 309)</span></div>
+          </div>
+          <div class="thought">
+            <div class="diamond">◆</div>
+            <div class="body">Thought for 8.0s</div>
+          </div>
+          <div class="tool">
+            <div class="diamond">◆</div>
+            <div class="body"><span class="verb">Read</span> <span class="path">tool_runtime.py</span> <span class="dim">(116-170 of 268)</span></div>
+          </div>
+          <div class="thought">
+            <div class="diamond">◆</div>
+            <div class="body">Thought for 22.3s</div>
+          </div>
+
+          <div class="prose">
+            <p>根因是 TUI 在 <code>await _run_loop</code> 上把界面卡住了，事件要等整轮结束才画。会改成后台跑 loop、立刻显示 query、工具起止进历史，并在流式 chunk 上推 <code>assistant_delta</code>。</p>
+          </div>
+
+          <div class="tool">
+            <div class="diamond">◆</div>
+            <div class="body"><span class="verb">Read</span> 2 files</div>
+          </div>
+          <div class="tool">
+            <div class="diamond">◆</div>
+            <div class="body"><span class="verb edit">Edit</span> <span class="path">agent_loop/llm/deepseek.py</span></div>
+          </div>
+          <div class="diff">
+            <div><span class="ln">8</span><span class="kw">import</span> os</div>
+            <div><span class="ln">9</span><span class="kw">import</span> random</div>
+            <div><span class="ln">10</span><span class="kw">from</span> dataclasses <span class="kw">import</span> dataclass, field</div>
+            <div class="del"><span class="ln">11</span><span class="kw">from</span> typing <span class="kw">import</span> Any, AsyncIterator, Dict, List, Optional</div>
+            <div class="add"><span class="ln">11</span><span class="kw">from</span> typing <span class="kw">import</span> Any, AsyncIterator, Callable, Dict, List, Optional</div>
+            <div><span class="ln">12</span></div>
+            <div><span class="ln">13</span><span class="kw">import</span> aiohttp</div>
+          </div>
+        </div>
+      </div>
+      <div class="status">idle · Enter send · Esc abort · /help</div>
+      <div class="input"><span>›</span><div>Message or /help</div></div>
+    </div>
+    <p class="note">
+      对照 Grok Build 的<strong>一轮结构</strong>，不是三张彩色卡片。<br>
+      1）用户：顶栏灰底 + <code>›</code>，一整句 query 始终钉在这一轮开头。<br>
+      2）过程：<code>◆</code> 时间线。Thought 灰色；工具 <b>Read / Search / Edit</b> 加粗，路径文件名加粗，行号灰色。同类可收成一行摘要（Read 8 files）。Edit 下面跟红绿 diff。<br>
+      3）回复：插在过程中间的正文，markdown（行内 code、列表）。不是等所有工具结束再出一张绿卡片。<br>
+      打开：<code>open docs/tui-demo.html</code>
+    </p>
+  </div>
+</body>
+</html>

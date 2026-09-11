@@ -7,7 +7,8 @@
 
 密钥：仓库根 `.env`（`DEEPSEEK_API_KEY`、`PERPLEXITY_API_KEY`），启动时 `envfile.load_dotenv()` 读入；已有环境变量不覆盖。`.env` 不进 git，`.env.example` 只有变量名。
 
-蓝图（已完成 / 要工程化 / 没做）：`docs/blueprint.html`。
+蓝图（已完成 / 要工程化 / 没做）：`docs/blueprint.html`。  
+跨会话 memory 框架（未实现）：`docs/memory.md`。
 
 ---
 
@@ -112,23 +113,23 @@ end_turn 之后才进的 steer 当成**新回合**：先按 60% 做压缩，再�
 
 ---
 
-## 4. 会话目录
+## 4. 家目录（会话 + 记忆占位）
 
-`<workspace>/.agent/sessions/<session_id>/session.jsonl`，一行一次提交。
-
-草稿纸在同一会话目录下，**不进 jsonl**，不进模型投影：
+不写进用户仓库。`SPARK_AGENT_HOME` 可改根目录，默认 `~/.spark-agent`（权限 700）。
 
 ```text
-.agent/sessions/<id>/
-├── session.jsonl
-└── workspace/tools_result/
-    ├── grep/<12位hex>        一次搜索的完整命中（cursor 翻页读它）
-    └── web_fetch/<12位hex>   一页全文（模型 grep/read 这条路径）
+~/.spark-agent/MEMORY.md                      全局长期（memory 模块再用）
+~/.spark-agent/projects/{slug}-{hash}/
+  memory/                                     仓库长期 + 中期（先建空目录）
+  chats/{sessionId}/session.jsonl             本轮对话
+  chats/{sessionId}/workspace/tools_result/   grep / fetch 快照
 ```
 
-`ToolRuntime.session_dir` = jsonl 的父目录（`attach_log` 时赋上）。grep / fetch 用它写草稿纸；`workspace` 仍是用户仓库根，搜代码用这个。
+`{slug}-{hash}` 由仓库目录名 + 绝对路径 sha256 前 8 位得出。同一路径稳定，不进 git。
 
-从仓库根 grep 会跳过名为 `.agent` 的目录。要搜 fetch 快照，必须 `path=` 指到那个文件（或 `tools_result/web_fetch`）。
+草稿纸在会话目录下，**不进 jsonl**，不进模型投影。`ToolRuntime.session_dir` = jsonl 的父目录。`workspace` 仍是用户仓库根，搜代码用这个。
+
+fetch 快照不在仓库里，`saved:` 多为家目录绝对路径；grep 那条路径时用 `path=` 指向该文件。
 
 | kind | type | 是什么 | 进模型吗 |
 |---|---|---|---|
@@ -267,6 +268,7 @@ Ctrl+C：`Abort` 打断退避和卡住的 POST（`RetryCancelledError`）。不�
 | grep | 正则；第一页 20 条；完整命中写入 `tools_result/grep/<id>`；footer 带 cursor 则再调 grep 只传 cursor；无 `session_dir` 不写盘、不给 cursor |
 | web_search | `query`，可选 `max_results`（默认 5，上限 10）。有 `PERPLEXITY_API_KEY` 走 Search API；否则（或 401/429/5xx/超时）走 DuckDuckGo 子进程。结果带 `[perplexity]` / `[duckduckgo]` / `[duckduckgo fallback]`。snippet 仍进 jsonl |
 | web_fetch | 一次一个公开 https URL；拦内网；跳转每次再检查。全文写入 `tools_result/web_fetch/<id>`；tool_result 只留路径、字数、约 30 行预览。找页内文字用 grep/read 且 `path=` 该文件 |
+| memory_search | 跨会话记忆。`query` 搜项目/中期/全局 md；`path` 读短名文件。不扫 jsonl |
 | bash | 本机命令；8k 截断；不要用来读改搜文件或搜网/拉页 |
 
 web_search 的 DuckDuckGo 在独立子进程里跑 `ddgs`，30 秒杀不掉就 SIGKILL，避免卡住 loop。
@@ -276,7 +278,7 @@ web_search 的 DuckDuckGo 在独立子进程里跑 `ddgs`，30 秒杀不掉就 S
 ## 10. 还没做的
 
 - skill（磁盘 SKILL.md；清单接到 assemble，不进核心工具表）  
-- 跨会话 memory（不是 jsonl，也不是压缩摘要）  
+- TUI 闲时定时 Flush/Dream（现在是每轮停稳 Flush，过门才 Dream）  
 - 插件 / 浏览器 / 桌面键鼠  
 - bash 大输出落盘（现在只有 8k 截断）  
 - 同一 `reply()` 跑着时另一路 HTTP 自动入队（现在请显式 `inbox.push_steer` / `push_follow_up`）  
@@ -288,10 +290,8 @@ web_search 的 DuckDuckGo 在独立子进程里跑 `ddgs`，30 秒杀不掉就 S
 
 循环和五件套可以停。建议：
 
-1. 冻压缩记账格式；进场比例与文档保持同一数字（现在是 60%）  
-2. skill（清单接到 assemble 里，不进工具表）  
-3. skill  
-4. memory 先当仓库文件，不单独立项  
+1. memory：Flush → 召回工具 → Dream（见 `docs/memory.md`）  
+2. skill（清单接到 assemble 里，不进工具表）
 
 ---
 
@@ -300,6 +300,7 @@ web_search 的 DuckDuckGo 在独立子进程里跑 `ddgs`，30 秒杀不掉就 S
 ```text
 prompt/assemble.py      拼 system（yaml + AGENTS.md + cwd + 日期）
 loop.py                 两层循环 + 压缩检查点
+paths.py                ~/.spark-agent 布局
 inbox.py / abort.py / compaction.py / recover.py / session_log.py / envfile.py
 runtime/                工单、并行、hook 分发、records
 tools/                  模型能调的工具 + registry + schemas
@@ -307,6 +308,7 @@ llm/  prompt/
 cli/app.py              命令行入口
 cli/trace.py            终端过程日志
 docs/blueprint.html     模块蓝图
+docs/memory.md          跨会话 memory 框架
 ```
 
-独立入口：`python -m agent_loop -s <id> "<问题>"`。
+独立入口：`python -m agent_loop` 打开最小 TUI；`python -m agent_loop -s <id> "<问题>"` 仍是一次性 CLI。

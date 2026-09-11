@@ -8,6 +8,7 @@ from agent_loop.tools import (
     bash_tool,
     edit_tool,
     grep_tool,
+    memory_search_tool,
     read_tool,
     web_fetch_tool,
     web_search_tool,
@@ -22,6 +23,7 @@ TOOLS = {
     grep_tool.NAME: grep_tool,
     web_search_tool.NAME: web_search_tool,
     web_fetch_tool.NAME: web_fetch_tool,
+    memory_search_tool.NAME: memory_search_tool,
 }
 
 

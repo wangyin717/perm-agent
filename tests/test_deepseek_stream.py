@@ -1,5 +1,13 @@
 """拼 SSE 增量和 usage。"""
-from agent_loop.llm.deepseek import parse_chat_response, parse_stream_chunks
+from agent_loop.llm.deepseek import _emit_text_delta, parse_chat_response, parse_stream_chunks
+
+
+def test_emit_text_delta_ignores_tool_chunks():
+    seen = []
+    _emit_text_delta({"choices": [{"delta": {"content": "hi"}}]}, seen.append)
+    _emit_text_delta({"choices": [{"delta": {"tool_calls": [{}]}}]}, seen.append)
+    _emit_text_delta({"choices": []}, seen.append)
+    assert seen == ["hi"]
 
 
 def test_parse_stream_text_and_usage():

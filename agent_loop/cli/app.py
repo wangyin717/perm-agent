@@ -10,6 +10,7 @@ from datetime import datetime
 
 from agent_loop.loop import ReactAgentLoop
 from agent_loop.envfile import load_dotenv
+from agent_loop.paths import session_log_path_for
 from agent_loop.cli.trace import log_session
 
 
@@ -24,7 +25,8 @@ async def _amain(query: str, session_id: str) -> str:
         "sessionId": session_id,
         "workspace": os.getcwd(),
     }
-    log_session(session_id, f".agent/sessions/{session_id}/session.jsonl")
+    log_path = session_log_path_for(os.getcwd(), session_id)
+    log_session(session_id, str(log_path))
     return await loop._run_loop(query, user_action_data)
 
 
@@ -35,22 +37,27 @@ def main() -> None:
         "-s",
         "--session",
         default=None,
-        help="会话 id，日志写到 .agent/sessions/<id>/session.jsonl；不传则每次新建",
+        help="会话 id；不传则每次新建 cli-时间戳",
     )
-    parser.add_argument("query", nargs="*", help="用户问题")
+    parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="打开最小 TUI（没有 query 时默认也走 TUI）",
+    )
+    parser.add_argument("query", nargs="*", help="用户问题；省略则进入 TUI")
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.WARNING,
         format="%(asctime)s  %(message)s",
         datefmt="%H:%M:%S",
     )
-    query = " ".join(args.query).strip()
-    if not query:
-        query = input("you> ").strip()
-    if not query:
-        parser.print_help()
-        raise SystemExit(1)
     session_id = args.session or datetime.now().strftime("cli-%Y%m%d-%H%M%S")
+    query = " ".join(args.query).strip()
+    if args.tui or not query:
+        from agent_loop.cli.tui import run_tui
+
+        run_tui(args.session)
+        return
     asyncio.run(_amain(query, session_id))
 
 

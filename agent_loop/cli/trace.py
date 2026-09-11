@@ -8,6 +8,8 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
+from agent_loop import events as _events
+
 _WS = re.compile(r"\s+")
 _LINE = 120
 _TOOL_LINE = 200
@@ -19,6 +21,9 @@ _DISPLAY_NAMES = {
     "write": "Write",
     "edit": "Edit",
     "grep": "Grep",
+    "web_search": "WebSearch",
+    "web_fetch": "WebFetch",
+    "memory_search": "MemorySearch",
 }
 
 
@@ -137,6 +142,8 @@ def format_tool_line_from_call(call: Dict[str, Any]) -> str:
 
 
 def _emit(text: str) -> None:
+    if not _events.print_to_stdout:
+        return
     sys.stdout.write(text)
     if not text.endswith("\n"):
         sys.stdout.write("\n")
@@ -152,10 +159,12 @@ def _section(title: str, body: str = "") -> None:
 
 
 def log_session(session_id: str, relpath: str) -> None:
+    _events.emit("session", session_id=session_id, path=relpath)
     _emit(f"session {session_id}  {relpath}\n\n")
 
 
 def log_user(text: str) -> None:
+    _events.emit("user", text=text or "")
     _section("User", text or "")
 
 
@@ -170,10 +179,33 @@ def format_context_usage(used: int, limit: int) -> str:
 
 
 def log_context(used: int, limit: int) -> None:
+    _events.emit("context", used=used, limit=limit)
     _emit(f"{format_context_usage(used, limit)}\n\n")
 
 
+def log_memory(
+    kind: str,
+    result: str,
+    path: str = "",
+    detail: str = "",
+    user_query: str = "",
+) -> None:
+    _events.emit(
+        "memory",
+        action=kind,
+        result=result,
+        path=path,
+        detail=detail,
+        user_query=user_query,
+    )
+    extra = f" {path}" if path else ""
+    more = f" ({detail})" if detail else ""
+    q = f'  "{user_query}"' if user_query else ""
+    _emit(f"[memory:{kind}] {result}{extra}{more}{q}\n\n")
+
+
 def log_compaction(level: str, before_ratio: float, after_ratio: float) -> None:
+    _events.emit("compaction", level=level, before=before_ratio, after=after_ratio)
     _emit(
         f"[compaction:{level}] {before_ratio * 100:.0f}% -> {after_ratio * 100:.0f}%\n\n"
     )
@@ -183,6 +215,7 @@ def log_llm_text(text: str) -> None:
     body = (text or "").rstrip()
     if not body:
         return
+    _events.emit("assistant", text=body)
     _section("Assistant", body)
 
 
@@ -190,11 +223,19 @@ def log_llm_tools(tool_calls: list) -> None:
     calls: List[Dict[str, Any]] = list(tool_calls or [])
     if not calls:
         return
+    _events.emit("tools", tool_calls=calls)
     lines = [format_tool_line_from_call(call) for call in calls]
     _section("Tools", "\n".join(lines))
 
 
+def log_tool_start(name: str, args: Optional[Dict[str, Any]] = None) -> None:
+    _events.emit("tool_start", name=name, args=args or {})
+    _emit(f"→ {name}  {summarize_args(args or {})}\n")
+
+
 def log_tool_result(name: str, content: str, is_error: bool) -> None:
-    """工具结果只进 jsonl；终端保持 Tools 列表干净。"""
     tag = "error" if is_error else "ok"
-    logging.debug("tool %s %s %s", name, tag, summarize_result(content))
+    preview = summarize_result(content)
+    _events.emit("tool_result", name=name, is_error=is_error, preview=preview)
+    _emit(f"← {name}  {tag}  {preview}\n\n")
+    logging.debug("tool %s %s %s", name, tag, preview)

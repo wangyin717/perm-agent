@@ -81,6 +81,8 @@ class ScriptedLLM:
 
     async def call(self, messages, tools=None, **kwargs):
         self.calls.append({"messages": messages, "tools": tools})
+        if not self.responses:
+            return LLMResponse(text="NO_REPLY")
         return self.responses.pop(0)
 
 

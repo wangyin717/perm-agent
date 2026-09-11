@@ -156,5 +156,37 @@
         "required": ["url"]
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "memory_search",
+      "description": "Search cross-session memory (project MEMORY.md, dated session notes, and global MEMORY.md). Use for prior decisions, how this repo is built, and user preferences. Do not use grep on the repo for that. Recalled memory is historical — verify against live files. Pass query to search; pass path (MEMORY.md, global/MEMORY.md, or a dated .md name) to read one file.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Keywords (AND). Omit when reading a file by path."
+          },
+          "path": {
+            "type": "string",
+            "description": "Short memory path: MEMORY.md, global/MEMORY.md, or YYYY-MM-DD-*.md"
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "Max search hits (default 8, max 20)"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "When reading by path, 1-based start line"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "When reading by path, max lines"
+          }
+        }
+      }
+    }
   }
 ]

@@ -19,7 +19,7 @@ from agent_loop.runtime.records import (
     new_result_id,
 )
 from agent_loop.tools.registry import available_tool_names, get_tool
-from agent_loop.cli.trace import log_tool_result
+from agent_loop.cli.trace import log_tool_result, log_tool_start
 
 
 @dataclass
@@ -129,6 +129,7 @@ class ToolRuntime:
         tool = prepared.tool
         call_id = prepared.call_id
         name = prepared.name
+        log_tool_start(name, started.effective_args)
         try:
             content = await tool.execute(
                 started.effective_args,

@@ -118,11 +118,6 @@ def test_grep_bad_cursor(tmp_path):
         )
 
 
-def test_session_log_path_layout(tmp_path):
-    path = session_log_path({"sessionId": "wy1", "workspace": str(tmp_path)})
-    assert path == tmp_path / ".agent" / "sessions" / "wy1" / "session.jsonl"
-
-
 def test_grep_path_file(tmp_path):
     (tmp_path / "a.py").write_text("hit\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("hit\n", encoding="utf-8")

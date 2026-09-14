@@ -1,13 +1,14 @@
-"""本机执行一条 bash 命令，以及这个工具自己的 before/after hook。"""
+"""本机执行一条 bash 命令，以及这个工具自己的 before hook。"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import subprocess
+import uuid
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict
-
+from typing import Any, Dict, List, Optional
 
 def before_tool_deny_rm(event: Dict[str, Any]):
     """拦住 bash 里的 rm -rf。只会被挂在 bash 名下，不会跑到别的工具上。"""
@@ -17,29 +18,23 @@ def before_tool_deny_rm(event: Dict[str, Any]):
     return None
 
 
-def after_tool_truncate_output(event):
-    content = event.get("content") or ""
-    limit = 8000
-    if len(content) <= limit:
-        return None
-    return {"content": content[:limit] + "\n...[output truncated]"}
-
-
 NAME = "bash"
 REPLAY = "safe"
 
 BEFORE_HOOKS = [
     before_tool_deny_rm,
 ]
+AFTER_HOOKS: list = []
 
-AFTER_HOOKS = [
-    after_tool_truncate_output,
-]
+MAX_LINES = 2000
+MAX_BYTES = 50 * 1024
+HEAD_LINES = 200
+TAIL_LINES = 1800
 
 
 async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_dir=None) -> str:
     cmd = args.get("cmd") or args.get("command") or ""
-    return await run_bash(cmd, sandbox)
+    return await run_bash(cmd, sandbox, session_dir=session_dir, workspace=workspace)
 
 
 def _local_run(cmd: str, timeout: float = 120):
@@ -56,7 +51,13 @@ def _local_run(cmd: str, timeout: float = 120):
     )
 
 
-async def run_bash(cmd: str, sandbox=None, timeout: float = 120) -> str:
+async def run_bash(
+    cmd: str,
+    sandbox=None,
+    timeout: float = 120,
+    session_dir: Optional[str] = None,
+    workspace: Optional[str] = None,
+) -> str:
     """失败必须 throw。默认本机 bash；测试可传入带 commands.run 的 sandbox。"""
     cmd = (cmd or "").strip()
     if not cmd:
@@ -69,9 +70,88 @@ async def run_bash(cmd: str, sandbox=None, timeout: float = 120) -> str:
         logging.warning("[bash] 超时，用同一命令重试 1 次")
         result = await _run_once(sandbox, cmd, timeout)
     output = ((result.stdout or "") + (result.stderr or "")).strip()
+    if not output and not result.exit_code:
+        return f"命令执行完毕（退出码 {result.exit_code}）"
+    shown = _preview_and_spill(output or "", session_dir, workspace)
     if result.exit_code:
-        raise RuntimeError(output or f"Command exited with code {result.exit_code}")
-    return output or f"命令执行完毕（退出码 {result.exit_code}）"
+        raise RuntimeError(shown or f"Command exited with code {result.exit_code}")
+    return shown
+
+
+def _preview_and_spill(
+    full: str, session_dir: Optional[str], workspace: Optional[str]
+) -> str:
+    lines = full.splitlines()
+    n_lines = len(lines)
+    n_bytes = len(full.encode("utf-8"))
+    if n_lines <= MAX_LINES and n_bytes <= MAX_BYTES:
+        return full
+    saved = ""
+    if session_dir:
+        saved = _write_output(session_dir, workspace, full)
+    preview = _head_tail(lines)
+    footer = _footer(saved, n_bytes, n_lines, bool(session_dir))
+    return preview + footer
+
+
+def _head_tail(lines: List[str]) -> str:
+    n = len(lines)
+    head_n = min(HEAD_LINES, n)
+    tail_n = min(TAIL_LINES, max(0, n - head_n))
+    tail_start = n - tail_n
+    omitted = max(0, tail_start - head_n)
+    head = list(lines[:head_n])
+    tail = list(lines[tail_start:]) if tail_n else []
+
+    def render() -> str:
+        parts = list(head)
+        if omitted:
+            parts.append(f"... {omitted} lines omitted ...")
+        parts.extend(tail)
+        return "\n".join(parts)
+
+    text = render()
+    while head and len(text.encode("utf-8")) > MAX_BYTES:
+        head.pop()
+        omitted += 1
+        text = render()
+    while tail and len(text.encode("utf-8")) > MAX_BYTES:
+        tail.pop(0)
+        omitted += 1
+        text = render()
+    if len(text.encode("utf-8")) > MAX_BYTES:
+        chunk = text.encode("utf-8")[-MAX_BYTES:]
+        return chunk.decode("utf-8", errors="ignore")
+    return text
+
+
+def _footer(saved: str, n_bytes: int, n_lines: int, had_session: bool) -> str:
+    if saved:
+        return (
+            f"\n\nsaved: {saved}\n"
+            f"chars: {n_bytes}\n"
+            f"lines: {n_lines}\n\n"
+            "To find something, grep or read the saved path "
+            "(pass path= that file). Do not pipe head/tail."
+        )
+    if had_session:
+        return "\n\n[output truncated; failed to save session file]"
+    return (
+        f"\n\n[showing head/tail of {n_lines} lines / {n_bytes} bytes; "
+        "full output was not saved (no session directory)]"
+    )
+
+
+def _write_output(session_dir: str, workspace: Optional[str], full: str) -> str:
+    short_id = uuid.uuid4().hex[:12]
+    dest = Path(session_dir) / "workspace" / "tools_result" / "bash" / f"{short_id}.txt"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(full, encoding="utf-8")
+    root = Path(workspace or ".").resolve()
+    try:
+        return dest.resolve().relative_to(root).as_posix()
+    except ValueError:
+        return str(dest)
 
 
 async def _run_once(sandbox, cmd: str, timeout: float):

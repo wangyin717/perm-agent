@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,7 @@ from agent_loop.llm import LLMResponse
 from agent_loop.recover import inspect_log
 from agent_loop.session_log import SessionLog, session_log_path
 from agent_loop.runtime.tool_runtime import ToolRuntime
-from agent_loop.tools.bash_tool import run_bash
+from agent_loop.tools.bash_tool import MAX_BYTES, MAX_LINES, run_bash
 
 
 class FakeSandbox:
@@ -146,6 +147,116 @@ def test_run_bash_timeout_retries_once_then_succeeds():
 def test_run_bash_zero_exit_returns_stdout():
     out = asyncio.run(run_bash("echo hi", FakeSandbox(stdout="hi\n")))
     assert out == "hi"
+
+
+def test_short_output_does_not_spill(tmp_path):
+    session = tmp_path / "chat"
+    out = asyncio.run(
+        run_bash(
+            "echo hi",
+            FakeSandbox(stdout="hi\n"),
+            session_dir=str(session),
+            workspace=str(tmp_path),
+        )
+    )
+    assert out == "hi"
+    bash_dir = session / "workspace" / "tools_result" / "bash"
+    assert not bash_dir.exists() or not list(bash_dir.glob("*.txt"))
+
+
+def test_long_lines_spill_head_tail(tmp_path):
+    lines = [f"L{i:04d}" for i in range(2500)]
+    body = "\n".join(lines)
+    session = tmp_path / "chat"
+    out = asyncio.run(
+        run_bash(
+            "seq",
+            FakeSandbox(stdout=body + "\n"),
+            session_dir=str(session),
+            workspace=str(tmp_path),
+        )
+    )
+    assert "L0000" in out
+    assert "L0199" in out
+    assert "L0200" not in out
+    assert "... 500 lines omitted ..." in out
+    assert "L0700" in out
+    assert "L2499" in out
+    assert "saved:" in out
+    assert "Do not pipe head/tail" in out
+    saved = [ln.split(" ", 1)[1] for ln in out.splitlines() if ln.startswith("saved:")][0]
+    path = Path(saved) if Path(saved).is_absolute() else tmp_path / saved
+    stored = path.read_text(encoding="utf-8")
+    assert stored.splitlines()[0] == "L0000"
+    assert stored.splitlines()[-1] == "L2499"
+    assert len(stored.splitlines()) == 2500
+
+
+def test_over_bytes_spills(tmp_path):
+    line = "x" * 200
+    body = "\n".join([line] * 400)
+    assert len(body.encode("utf-8")) > MAX_BYTES
+    assert body.count("\n") + 1 < MAX_LINES
+    session = tmp_path / "chat"
+    out = asyncio.run(
+        run_bash(
+            "big",
+            FakeSandbox(stdout=body),
+            session_dir=str(session),
+            workspace=str(tmp_path),
+        )
+    )
+    assert "saved:" in out
+    assert len(out.encode("utf-8")) <= MAX_BYTES + 800
+
+
+def test_long_failure_spills_then_raises(tmp_path):
+    lines = [f"E{i:04d}" for i in range(2100)]
+    body = "\n".join(lines)
+    session = tmp_path / "chat"
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(
+            run_bash(
+                "false",
+                FakeSandbox(stderr=body + "\n", exit_code=1),
+                session_dir=str(session),
+                workspace=str(tmp_path),
+            )
+        )
+    msg = str(exc.value)
+    assert "E0000" in msg
+    assert "E2099" in msg
+    assert "saved:" in msg
+    saved = [ln.split(" ", 1)[1] for ln in msg.splitlines() if ln.startswith("saved:")][0]
+    path = Path(saved) if Path(saved).is_absolute() else tmp_path / saved
+    assert "E2099" in path.read_text(encoding="utf-8")
+
+
+def test_long_without_session_notes_no_file():
+    body = "\n".join(f"L{i}" for i in range(2100))
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(run_bash("false", FakeSandbox(stdout=body, exit_code=1)))
+    msg = str(exc.value)
+    assert "no session directory" in msg
+    assert "saved:" not in msg
+    assert "... " in msg and "omitted" in msg
+
+
+def test_runtime_long_success_has_no_8k_cut(tmp_path):
+    body = "\n".join(f"L{i:04d}" for i in range(2100))
+    runtime = ToolRuntime()
+    runtime.workspace = str(tmp_path)
+    runtime.session_dir = str(tmp_path / "chat")
+    result = asyncio.run(
+        runtime.call_tool(
+            _bash_call("seq"),
+            FakeSandbox(stdout=body + "\n"),
+        )
+    )
+    assert result.is_error is False
+    assert "...[output truncated]" not in result.content
+    assert "saved:" in result.content
+    assert "L2099" in result.content
 
 
 def test_runtime_nonzero_exit_closes_ticket_with_is_error():

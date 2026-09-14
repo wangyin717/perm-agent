@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from agent_loop.tools.read_tool import after_tool_truncate_output, resolve_path
+from agent_loop.tools.read_tool import resolve_path
 
 NAME = "grep"
 REPLAY = "safe"
@@ -46,7 +46,7 @@ def before_tool_deny_empty_pattern(event: Dict[str, Any]):
 
 
 BEFORE_HOOKS = [before_tool_deny_empty_pattern]
-AFTER_HOOKS = [after_tool_truncate_output]
+AFTER_HOOKS: list = []
 
 
 def which_rg() -> Optional[str]:

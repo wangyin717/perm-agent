@@ -5,17 +5,22 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime
+from io import StringIO
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
+from rich.console import Console
 from rich.markdown import Heading, Markdown as RichMarkdown
 from rich.style import Style
+from rich.text import Text
 from rich.theme import Theme
 from textual.app import App, ComposeResult
 from textual.actions import SkipAction
 from textual.binding import Binding
 from textual.containers import VerticalGroup, VerticalScroll
 from textual.markup import escape as markup_escape
+from textual.selection import Selection
+from textual.visual import RenderOptions
 from textual.widgets import Input, Static
 
 from agent_loop import events
@@ -144,6 +149,23 @@ class ProseMarkdown(RichMarkdown):
         self.elements["heading_open"] = _LeftHeading
 
 
+def _markdown_as_text(src: str, width: int) -> Text:
+    """Markdown 画成 Rich Text，Textual 才能拖选/复制。"""
+    console = Console(
+        file=StringIO(),
+        width=max(int(width), 8),
+        force_terminal=True,
+        color_system="truecolor",
+        highlight=False,
+        theme=_PROSE_THEME,
+        legacy_windows=False,
+    )
+    with console.capture() as cap:
+        console.print(ProseMarkdown(src or " "), end="")
+    raw = cap.get().rstrip("\n") or " "
+    return Text.from_ansi(raw)
+
+
 def _bold_verb(text: str) -> str:
     """工具名加粗，入参灰色且截断。"""
     parts = text.split(None, 1)
@@ -207,19 +229,25 @@ class TimelineRow(Static):
     DEFAULT_CSS = """
     TimelineRow {
         width: 100%;
+        height: 1;
+        margin: 0;
         padding: 0 2;
         color: #3c3c43;
     }
     TimelineRow.thought { color: #1c1c1e; }
     TimelineRow.tool { color: #1c1c1e; }
     TimelineRow.edit { color: #1c1c1e; }
-    TimelineRow.muted { color: #6e6e73; }
+    TimelineRow.muted {
+        height: auto;
+        color: #6e6e73;
+    }
     """
 
 
 class Prose(Static):
-    """一段回复：用 Rich 画 markdown，不要拆成一堆 Textual 子控件（滚动会卡死）。"""
+    """一段回复：用 Rich 画 markdown，再转成 Text，才能拖选复制。"""
 
+    ALLOW_SELECT = True
     DEFAULT_CSS = """
     Prose {
         height: auto;
@@ -232,11 +260,41 @@ class Prose(Static):
 
     def __init__(self, markdown: str = "") -> None:
         self._src = markdown or ""
-        super().__init__(ProseMarkdown(self._src or " "), shrink=True, markup=False)
+        self._paint_width = 80
+        super().__init__(_markdown_as_text(self._src, 80), shrink=True, markup=False)
 
     def set_markdown(self, markdown: str) -> None:
         self._src = markdown or ""
-        self.update(ProseMarkdown(self._src or " "))
+        self._repaint()
+
+    def on_mount(self) -> None:
+        self._repaint()
+
+    def on_resize(self) -> None:
+        if int(self.size.width) != self._paint_width:
+            self._repaint()
+
+    def _repaint(self) -> None:
+        width = int(self.content_size.width or self.size.width or 80)
+        if width <= 0:
+            width = 80
+        self._paint_width = width
+        self.update(_markdown_as_text(self._src, width))
+
+    def get_selection(self, selection: Selection) -> Optional[Tuple[str, str]]:
+        visual = self._render()
+        width = max(int(self.content_size.width), 1)
+        strips = visual.render_strips(
+            width,
+            None,
+            self.visual_style,
+            RenderOptions(self._get_style, self.styles, None, None),
+        )
+        text = "\n".join(strip.text for strip in strips)
+        extracted = selection.extract(text)
+        if not extracted:
+            return None
+        return extracted, "\n"
 
 
 class SparkTui(App):
@@ -262,6 +320,16 @@ class SparkTui(App):
         height: auto;
         width: 1fr;
         layout: vertical;
+        margin: 0;
+        padding: 0;
+    }
+    #timeline TimelineRow {
+        height: 1;
+        margin: 0;
+        padding: 0 2;
+    }
+    #timeline TimelineRow.muted {
+        height: auto;
     }
     #timeline Prose {
         height: auto;

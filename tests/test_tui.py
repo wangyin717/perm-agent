@@ -114,3 +114,24 @@ async def _summary() -> None:
 
 def test_worked_summary_includes_model_context_compaction():
     asyncio.run(_summary())
+
+
+async def _copy_prose() -> None:
+    from agent_loop.cli.tui import Prose
+
+    app = SparkTui("copy-test", "/tmp/spark-agent-tui-copy")
+    async with app.run_test(size=(80, 24)) as pilot:
+        turn = app._start_turn("q", think=False)
+        prose = Prose("hello **world**\n\nsecond paragraph")
+        turn.mount(prose)
+        await pilot.pause()
+        prose.text_select_all()
+        await pilot.pause()
+        text = app.screen.get_selected_text() or ""
+        assert "hello" in text, repr(text)
+        assert "world" in text, repr(text)
+        assert "second paragraph" in text, repr(text)
+
+
+def test_prose_can_copy_selection():
+    asyncio.run(_copy_prose())

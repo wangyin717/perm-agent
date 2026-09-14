@@ -3,7 +3,7 @@
     "type": "function",
     "function": {
       "name": "bash",
-      "description": "Run a shell command in the local working directory. Use for git, tests, installs, and one-off scripts. Do not use it to cat/sed/head/read/write/grep source files — use the read, write, edit, and grep tools instead.",
+      "description": "Run a shell command in the local working directory. Use for git, tests, installs, and one-off scripts. Do not use it to cat/sed/head/read/write/grep source files — use the read, write, edit, and grep tools instead. If stdout is longer than 2000 lines or 50KB, the full output is saved under tools_result/bash/ and this result is head+tail only — grep or read that saved path. Do not pipe head/tail yourself.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -20,7 +20,7 @@
     "type": "function",
     "function": {
       "name": "read",
-      "description": "Read a text file. Returns numbered lines. Use offset (1-based) and limit for large files; if truncated, continue with the next offset. Do not use bash cat/sed/head for this.",
+      "description": "Read a file. Text files return numbered lines (offset 1-based, limit). pdf/docx/xlsx are extracted to text: short files return inline; long ones save under tools_result/read/ and return a preview — grep or read that saved path. Do not use bash to cat or parse these.",
       "parameters": {
         "type": "object",
         "properties": {

@@ -3,25 +3,41 @@
 这套 loop 参考 pi harness-v2：本地可跑、jsonl 可对账。  
 还不是完整 pi（没有多 lane、SQLite、skill）。
 
-加工具：写 `execute` + `REPLAY` + `READ_ONLY` + 自己的 hooks，登记进 `TOOLS`，不必改循环。
+加工具：写 `execute` + `REPLAY` + `READ_ONLY` + 自己的 hooks，登记进 `TOOLS`，不必改循环。增删工具只改 registry + schema；人设里的工具注意事项按启用工具再拼，不要在 yaml 里抄参数表。
 
 密钥：仓库根 `.env`（`DEEPSEEK_API_KEY`、`PERPLEXITY_API_KEY`），启动时 `envfile.load_dotenv()` 读入；已有环境变量不覆盖。`.env` 不进 git，`.env.example` 只有变量名。
 
-蓝图（已完成 / 要工程化 / 没做）：`docs/blueprint.html`。  
-跨会话 memory 框架（未实现）：`docs/memory.md`。
+蓝图：`docs/blueprint.html`。跨会话 memory：`docs/memory.md`。
+
+---
+
+## 分层（现在 vs 以后）
+
+可以按四层想，不要并列两套「核心」：
+
+| 层 | 现在 | 以后 |
+|---|---|---|
+| 模型 | `llm/deepseek.py`：`call(messages, tools)` | 再加适配器 |
+| 核心 | loop + runtime + jsonl + inbox / 压缩 / 恢复 | 尽量不塞具体工具实现 |
+| 界面 | `cli/tui.py`、`cli/trace.py`：只订 `events`，不改 jsonl | 还可有 headless |
+| 扩展 | 无 skill / MCP / 插件 | 应用运行时（不必叫 chord） |
+
+`tools/` + `prompt/` + `memory/` 是 **这个 coding agent 的产品能力**，和 loop 一起发布。循环真正必备的是「能调工具、能带 system」，不是必备 bash 这一份实现。现阶段一个包，不必拆成两个 Python 包。
+
+权威状态是 jsonl。TUI 是订阅者。
 
 ---
 
 ## 1. React loop
 
-入口：CLI 走 `ReactAgentLoop._run_loop`。`reply(memory, …)` 还在，是 SwiftAgent 时期的外壳，本仓库不用。
+入口：CLI / TUI 走 `ReactAgentLoop._run_loop`。`reply(memory, …)` 还在，是 SwiftAgent 时期的外壳，本仓库不用。
 
 ```text
 读 jsonl，apply_recovery（先给上一世收尸）
 再 inspect 一次
 continue_llm → 本轮新话进 inbox.steer（插队）
 其它该写 user → append user
-messages = [system yaml] + jsonl 的 entry 投影（已应用 redaction / summary）
+messages = [system] + jsonl 的 entry 投影（已应用 redaction / summary）
 
 外层 while:
   内层 while (还有 tool 或 steer):
@@ -39,7 +55,17 @@ messages = [system yaml] + jsonl 的 entry 投影（已应用 redaction / summar
 
 LLM 每步只有两种出口：`end_turn` 或 `tool_use`。没有 `MAX_STEPS`，和 pi 一样靠模型停；abort / 工具 `terminate` 可提前停（`terminate` 只截断喂给模型的投影，jsonl 仍记下所有已执行的结果）。
 
-人设由 `prompt/assemble.py` 每次拼：yaml 行为稿 + 仓库根 `AGENTS.md`（若有，超过 8k 截断）+ `Current working directory` + `Today's date`。yaml 不再复述工具参数（那是 schema 的事）。skill 清单以后接在 yaml 和 AGENTS.md 之间。
+人设由 `prompt/assemble.py` 每次拼：
+
+```text
+yaml 行为稿
++ 已启用工具的 tool_notes（见 §10）
++ 仓库根 AGENTS.md（若有，超过 8k 截断）
++ Current working directory
++ Today's date
+```
+
+参数、用法写在 schema。yaml 只留人设和「重叠工具怎么选」。skill 清单以后接在 yaml 和 AGENTS.md 之间。
 
 ---
 
@@ -75,19 +101,21 @@ end_turn 之后才进的 steer 当成**新回合**：先按 60% 做压缩，再�
 
 - hook 只返回意见，**不准** `messages.append`
 - `block` / 未知工具：**不写** started，直接 `create_error_tool_result`
-- 写入时截断（第一次进 messages 就是短的，不改已经 cache 过的前缀）：
+- 超长输出：**不要**用 after 硬切再丢掉后半段。read / grep / bash 在 **execute** 里翻页或落盘（见 §9、§11）。after 现在：
 
   | 工具 | after hook |
   |---|---|
-  | bash / read / grep | 8k 字符 |
+  | bash / read / grep / edit / write | 无（空列表） |
   | web_search | 32k |
   | web_fetch | 64k（落盘后回给模型的是短预览，一般碰不到） |
 
-- bash：另有 `before_tool_deny_rm`
+- bash：另有 `before_tool_deny_rm`；edit：空 `old` 在 before_tool 拦住
 
-加工具：`NAME` / `REPLAY` / `READ_ONLY` / `BEFORE_HOOKS` / `AFTER_HOOKS` / `execute` → `tools/registry.py`。
+加工具：`NAME` / `REPLAY` / `READ_ONLY` / `BEFORE_HOOKS` / `AFTER_HOOKS` / `execute` → `tools/registry.py`，并在 `tool_schemas.json` 加 schema。理想情况 schema 跟 registry 一份清单；现在仍是两处，增删要一起改。
 
-当前工具：`bash` / `read` / `write` / `edit` / `grep` / `web_search` / `web_fetch`。
+当前工具：`bash` / `read` / `write` / `edit` / `grep` / `web_search` / `web_fetch` / `memory_search`。
+
+落盘「给模型看之前」这个时机对，但 **after_tool 以现在的形状不能当所有工具的唯一落盘点**（没有 `session_dir`；grep 的 cursor 快照也不是截断）。blob 类（fetch / 长抽取 / bash）在 execute 末尾调同一类「预览 + 写 `tools_result`」；grep cursor、read 文本 offset 留在各自 execute。以后若要通用 Truncate，再给 after 补 `session_dir`，并且仍盖不住 grep / 普通 read。
 
 ---
 
@@ -105,31 +133,35 @@ end_turn 之后才进的 steer 当成**新回合**：先按 60% 做压缩，再�
 
 | 工具 | `READ_ONLY` | 锁 |
 |---|---|---|
-| read / grep | True | 有 `path` 才参与；撞上本批某条写路径才排队 |
+| read / grep / memory_search | True | 有 `path` 才参与；撞上本批某条写路径才排队 |
 | write / edit | False | 按解析后的绝对路径字符串全等加锁（不做目录包含） |
-| bash / web_search / web_fetch | 无仓库 path | 不加锁 |
+| bash | False | 共用 `__bash__`，同一批里 bash 彼此串行；不解析 cmd，也不和 edit/write 的文件 path 互斥 |
+| web_search / web_fetch | 无仓库 path | 不加锁 |
 
 `terminate`：一批都跑完。jsonl 照实记录所有 `tool_result`。喂给模型的 messages / `entries_to_messages` 投影按 `tool_calls` 顺序排，截到第一条 `terminate=True`，并把该条 assistant 的 `tool_calls` 裁到与保留的 result 对齐。恢复仍只看工单关没关，不认 terminate。
 
 ---
 
-## 4. 家目录（会话 + 记忆占位）
+## 4. 家目录（会话 + 记忆）
 
-不写进用户仓库。`SPARK_AGENT_HOME` 可改根目录，默认 `~/.spark-agent`（权限 700）。
+不写进用户仓库。`SPARK_AGENT_HOME` 可改根目录，默认 `~/.spark-agent`（权限 700）。细节见 `docs/memory.md`。
 
 ```text
-~/.spark-agent/MEMORY.md                      全局长期（memory 模块再用）
+~/.spark-agent/MEMORY.md                      全局长期
 ~/.spark-agent/projects/{slug}-{hash}/
-  memory/                                     仓库长期 + 中期（先建空目录）
+  memory/MEMORY.md                            项目长期（Dream 覆盖）
+  memory/YYYY-MM-DD-slug-{sessionId}.md       Flush 中期
+  memory/activity.jsonl
   chats/{sessionId}/session.jsonl             本轮对话
-  chats/{sessionId}/workspace/tools_result/   grep / fetch 快照
+  chats/{sessionId}/workspace/tools_result/
+    grep/  web_fetch/  read/  bash/           草稿纸，不进 jsonl
 ```
 
 `{slug}-{hash}` 由仓库目录名 + 绝对路径 sha256 前 8 位得出。同一路径稳定，不进 git。
 
 草稿纸在会话目录下，**不进 jsonl**，不进模型投影。`ToolRuntime.session_dir` = jsonl 的父目录。`workspace` 仍是用户仓库根，搜代码用这个。
 
-fetch 快照不在仓库里，`saved:` 多为家目录绝对路径；grep 那条路径时用 `path=` 指向该文件。
+fetch / 长文档 / 长 bash 的 `saved:` 多为家目录绝对路径（相对 workspace 算不出来时）；grep / read 那条路径时用 `path=` 指向该文件。
 
 | kind | type | 是什么 | 进模型吗 |
 |---|---|---|---|
@@ -220,6 +252,8 @@ Ctrl+C 是取消，不是崩溃：未关工具更合理写 interrupted，不要�
 
 恢复后投影同样走 `entries_to_messages`，所以崩溃前落盘的 redaction / summary 下次进程还能看见。
 
+`ToolRuntime` 里「先读再改」的快照（path → content + mtime）**只在内存**，不进 jsonl。恢复或新开一轮后表是空的，必须再 `read` 才能 `edit`。
+
 ---
 
 ## 7. LLM 失败：重试 vs step_attempt（不要混）
@@ -252,6 +286,8 @@ Ctrl+C：`Abort` 打断退避和卡住的 POST（`RetryCancelledError`）。不�
 
 非 0 / 空 cmd **不重试**。
 
+拼好 stdout+stderr 之后、return 或 raise **之前**，走同一套 `_preview_and_spill`（成功失败都算）。否则 pytest 栈会变成异常正文整份进模型。
+
 活着失败：当场关单。只有进程死在 execute 里，才留给 `inspect_log`。
 
 `asyncio.to_thread` + `wait_for`：本机 `subprocess.run(..., timeout=)` 超时会杀子进程；`wait_for` 仍杀不掉线程里卡住的调用。真要停远端沙箱里的命令，还没做（现在默认不走 E2B）。
@@ -262,53 +298,129 @@ Ctrl+C：`Abort` 打断退避和卡住的 POST（`RetryCancelledError`）。不�
 
 | 工具 | 要点 |
 |---|---|
-| read | `path` + 可选 `offset`/`limit`，`LINE\|content`；`REPLAY=safe` |
-| write | 整文件；`REPLAY=never`；缺目录 mkdir |
-| edit | 精确替换；空 old 在 before_tool 拦住；`REPLAY=never` |
+| read | 文本：`offset`（1-based）/`limit`，默认最多 1000 行或 10 万字节，footer 写下一页 `offset`。pdf/docx/xlsx 用打包的 pypdf / python-docx / openpyxl 抽成文本：≤8000 字符内联；更长写入 `tools_result/read/<hash>.txt`，结果只留预览和路径。扫描件抽不出字则报错。图片仍当二进制拒绝。`REPLAY=safe` |
+| write | 整文件；覆盖已有文件须先 read（见 §12）；新建不需要。`REPLAY=never`；缺目录 mkdir |
+| edit | 精确字符串替换；空 old 在 before_tool 拦住；须先 read（分页也算）；成功后 TUI 画红绿 hunk。`REPLAY=never` |
 | grep | 正则；第一页 20 条；完整命中写入 `tools_result/grep/<id>`；footer 带 cursor 则再调 grep 只传 cursor；无 `session_dir` 不写盘、不给 cursor |
 | web_search | `query`，可选 `max_results`（默认 5，上限 10）。有 `PERPLEXITY_API_KEY` 走 Search API；否则（或 401/429/5xx/超时）走 DuckDuckGo 子进程。结果带 `[perplexity]` / `[duckduckgo]` / `[duckduckgo fallback]`。snippet 仍进 jsonl |
 | web_fetch | 一次一个公开 https URL；拦内网；跳转每次再检查。全文写入 `tools_result/web_fetch/<id>`；tool_result 只留路径、字数、约 30 行预览。找页内文字用 grep/read 且 `path=` 该文件 |
 | memory_search | 跨会话记忆。`query` 搜项目/中期/全局 md；`path` 读短名文件。不扫 jsonl |
-| bash | 本机命令；8k 截断；不要用来读改搜文件或搜网/拉页 |
+| bash | 本机命令。超过 **2000 行或 50KB（UTF-8 字节）** 先到先停：全文写入 `tools_result/bash/<id>.txt`，模型看到前 200 行 + 后 1800 行。无 session 只做头尾、注明没存文件。不要用来读改搜文件或搜网/拉页；不要自己 `| head` / `| tail` |
 
 web_search 的 DuckDuckGo 在独立子进程里跑 `ddgs`，30 秒杀不掉就 SIGKILL，避免卡住 loop。
 
+UTF-8 字节是通用编码体积，不是中文专用：`len(s.encode("utf-8"))`。中文同等字符数会先碰到 50KB。
+
+附件：没有正规 PDF 工具通道。文字型 pdf/docx/xlsx 走 `read` 的抽取库（打进依赖）。模型用 bash 现写 `pypdf` 脚本不稳。扫描件、图片、音视频仍不行。
+
 ---
 
-## 10. 还没做的
+## 10. 人设 vs 工具注意事项
+
+`system_prompt.yaml`：
+
+- `system_prompt`：人设、怎么干活、怎么写回复。不要抄 `cmd`/`offset` 这类参数。
+- `tool_notes`：按工具名分段。`assemble` 对照 `TOOLS` 的插入顺序，**只把已启用的段**拼进 `# Tool notes`。从 registry 拿掉工具，对应段落不会再出现。
+
+现在有笔记的：`bash`（专用工具优先、别 `find $HOME`、超长落盘）、`memory_search`、`edit`、`write`。
+
+找文件：先看工作区、Desktop、Downloads、Documents；macOS 用 `mdfind -name`。禁止 `find $HOME` / `find ~`，也不要用 `-not -path '*/Library/*'` 当省事办法（会漏掉 iCloud）。
+
+---
+
+## 11. 超长结果：一种预算，不要两刀
+
+| 机制 | 放哪 | 模型怎么续 |
+|---|---|---|
+| read 文本 | execute 按行切页 | `offset=N` |
+| grep | execute 写命中快照 | `cursor=` |
+| 长 pdf/docx/xlsx | execute 抽完 >8k 落盘 | grep/read 那个 txt |
+| web_fetch | execute 默认落盘 | 同上 |
+| bash | execute 行数或字节超限落盘 | grep/read 那个 txt；预览是头尾 |
+
+不要 after 再切 8k：那会切掉页脚里的 offset/cursor。bash 也不要只留前 8k（失败栈在尾巴）。
+
+Pi / OpenCode / Grok / Hermes 对 bash 几乎都是：**头或尾的预览 + 全文落盘 + 告诉模型路径**。我们对齐：2000 行或 50KB，前 200 + 后 1800，文件在 `tools_result/bash/`。
+
+落盘阈值在内存里量已经拿到的字符串，不必先写盘再 `stat`。边跑边流式写文件（避免几百 MB 日志撑爆内存）还没做。
+
+---
+
+## 12. edit：精确替换 + 先读再改 + UI diff
+
+算法和 Claude / Grok 同一条路：磁盘上精确匹配 `old`→`new`，默认唯一，否则报行号或要求 `replace_all`。空 `new` 删除。空 `old` 拒绝（新建走 write）。不按行号、不是正则。Codex 的 `apply_patch` 文法不学。
+
+**先读再改**（学 Claude 的硬门，不学「必须读完全文」）：
+
+- `ToolRuntime` 内存表：`绝对路径 → {content, mtime}`。不写文件系统。
+- 成功 `read`（整份或 offset 翻页都算）记下快照。pdf/docx/xlsx 抽取 **不记账**。
+- `edit`、覆盖**已有文件**的 `write`：从没 read、或磁盘相对上次读 **mtime 且内容都变了** → 失败并写明原因。只变 mtime、内容相同则放行并刷新 timestamp。
+- **新建** write 不需要先 read；写成功后记账，紧接着 edit 不用再读。
+- edit/write 成功立刻用新内容和新 mtime 覆盖记录，同一轮可以连改。
+
+read 分页是「全文进内存再切一页给模型」。默认也可能只返回前 1000 行。这 **不影响**「有没有 read 过」：有成功 read 就能 edit；`old` 仍在磁盘全文里匹配。不要用「是否传了 offset」当门禁，否则大文件第一次默认 read 也不算数，上下文会被撑爆。
+
+成功 edit 后：`edit_diff` 事件给 TUI 画红绿 hunk（上下 2 行上下文，最多约 14 行）。tool 结果里带同一份纯文本补丁给模型。`replace_all` 只展示第一处 + `… and N more`。不上备份、LSP、弯引号。
+
+---
+
+## 13. TUI
+
+`cli/tui.py` 订 `events`，不改 jsonl。`python -m agent_loop` 开 TUI；`-s <id> "<问题>"` 仍是一次性 CLI。须用项目 `.venv`。
+
+过程行：灰色菱形 + 加粗动词。思考中底栏走 `Thinking… Xs`（整轮忙碌都走秒）；该段想完才在时间线落下 `Thought for Xs`。回合结束一行：
+
+`Worked for 1m41s | deepseek-v4-flash | 112K / 1M`
+
+压过窗口再接 `| compacted …`。`memory flush no_reply` 不进时间线。
+
+正文是 Static + Rich 画成可选中文本；拖选后 Ctrl+C。工具/Thought 行高 1。markdown 引用块灰色，不要品红。
+
+---
+
+## 14. 还没做的
 
 - skill（磁盘 SKILL.md；清单接到 assemble，不进核心工具表）  
 - TUI 闲时定时 Flush/Dream（现在是每轮停稳 Flush，过门才 Dream）  
-- 插件 / 浏览器 / 桌面键鼠  
-- bash 大输出落盘（现在只有 8k 截断）  
+- 插件 / MCP / 浏览器  
+- bash 边跑边往文件流（现在仍先整段进内存再量）  
+- schema 从 registry 生成（现在两份清单）  
 - 同一 `reply()` 跑着时另一路 HTTP 自动入队（现在请显式 `inbox.push_steer` / `push_follow_up`）  
 - 多 lane、SQLite  
 
 ---
 
-## 11. 下一步
+## 15. 下一步
 
-循环和五件套可以停。建议：
+循环、工单、压缩、恢复可以停。建议：
 
-1. memory：Flush → 召回工具 → Dream（见 `docs/memory.md`）  
-2. skill（清单接到 assemble 里，不进工具表）
+1. skill（清单接到 assemble，不进工具表）  
+2. schema 与 registry 合成一份  
+3. 需要时再做 bash 流式落盘  
+
+memory 路径见 `docs/memory.md`。
 
 ---
 
 ## 文件对照
 
 ```text
-prompt/assemble.py      拼 system（yaml + AGENTS.md + cwd + 日期）
+prompt/assemble.py      拼 system（yaml + tool_notes + AGENTS.md + cwd + 日期）
+prompt/system_prompt.yaml  人设 + 按工具启用的注意事项
 loop.py                 两层循环 + 压缩检查点
 paths.py                ~/.spark-agent 布局
+memory/                 Flush / Dream / 召回
 inbox.py / abort.py / compaction.py / recover.py / session_log.py / envfile.py
-runtime/                工单、并行、hook 分发、records
+runtime/                工单、并行、hook、先读再改快照
 tools/                  模型能调的工具 + registry + schemas
-llm/  prompt/
-cli/app.py              命令行入口
-cli/trace.py            终端过程日志
+llm/deepseek.py
+cli/tui.py              Grok 风格时间线
+cli/app.py              入口
+cli/trace.py            终端过程日志 + events
+events.py               内核 → 界面
 docs/blueprint.html     模块蓝图
-docs/memory.md          跨会话 memory 框架
+docs/memory.md          跨会话 memory
+docs/harness.md         本文
 ```
 
-独立入口：`python -m agent_loop` 打开最小 TUI；`python -m agent_loop -s <id> "<问题>"` 仍是一次性 CLI。
+独立入口：`python -m agent_loop` 打开 TUI；`python -m agent_loop -s <id> "<问题>"` 仍是一次性 CLI。

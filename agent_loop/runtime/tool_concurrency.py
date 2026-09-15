@@ -3,8 +3,9 @@
 阶段一严格串行：逐个 before_tool + 写 tool_started。unknown/blocked 直接产出错误结果，
 不进入阶段二。
 
-阶段二：READ_ONLY=False 且有 path 的调用按解析后的绝对路径建 asyncio.Lock；
-任何调用（含只读）命中这些写路径就排队等锁，其余（含 bash、不同路径的读写）直接并发。
+阶段二：READ_ONLY=False 且有 lock_path 的调用按该 key 建 asyncio.Lock
+（文件工具用绝对路径；bash 共用 __bash__，彼此串行）。
+任何调用命中这些写路径就排队等锁，其余（不同路径的读写、web_*）直接并发。
 asyncio.gather 一次等完，返回顺序 = 原始调用顺序。
 """
 

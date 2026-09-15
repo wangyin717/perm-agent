@@ -17,6 +17,7 @@ from rich.theme import Theme
 from textual.app import App, ComposeResult
 from textual.actions import SkipAction
 from textual.binding import Binding
+from pygments.token import Token
 from textual.containers import VerticalGroup, VerticalScroll
 from textual.markup import escape as markup_escape
 from textual.selection import Selection
@@ -26,6 +27,7 @@ from textual.widgets import Input, Static
 from agent_loop import events
 from agent_loop.cli.app import CliDeps
 from agent_loop.loop import ReactAgentLoop
+from agent_loop.tools.diff_view import clip_diff_line
 from agent_loop.paths import session_log_path_for
 from agent_loop.session_log import SessionLog
 
@@ -213,6 +215,55 @@ def _muted(text: str) -> str:
     return f"[#6e6e73]{text}[/]"
 
 
+_PYGMENT_COLORS = {
+    Token.Keyword: "#7c3aed",
+    Token.Keyword.Constant: "#7c3aed",
+    Token.Name.Builtin: "#7c3aed",
+    Token.Name.Function: "#1c1c1e",
+    Token.Name.Class: "#1c1c1e",
+    Token.Name.Decorator: "#1967d2",
+    Token.String: "#c2410c",
+    Token.String.Doc: "#c2410c",
+    Token.Comment: "#6e6e73",
+    Token.Number: "#1967d2",
+    Token.Operator: "#3c3c43",
+}
+
+
+def _pygment_style(tok) -> str:
+    while tok is not None:
+        if tok in _PYGMENT_COLORS:
+            return _PYGMENT_COLORS[tok]
+        tok = getattr(tok, "parent", None)
+    return "#1c1c1e"
+
+
+def highlight_code_line(code: str, filename: str = "") -> Text:
+    code = clip_diff_line(code.replace("\n", ""))
+    try:
+        from pygments.lexers import get_lexer_by_name, get_lexer_for_filename
+        from pygments.util import ClassNotFound
+    except ImportError:
+        return Text(code, style="#1c1c1e")
+    lexer = None
+    if filename:
+        try:
+            lexer = get_lexer_for_filename(filename, code, stripnl=False)
+        except (ClassNotFound, ValueError):
+            lexer = None
+    if lexer is None:
+        try:
+            lexer = get_lexer_by_name("python", stripnl=False)
+        except ClassNotFound:
+            return Text(code, style="#1c1c1e")
+    out = Text()
+    for tok, val in lexer.get_tokens(code + "\n"):
+        val = val.replace("\n", "")
+        if val:
+            out.append(val, _pygment_style(tok))
+    return out if out.plain else Text(code, style="#1c1c1e")
+
+
 class UserBanner(Static):
     DEFAULT_CSS = """
     UserBanner {
@@ -242,6 +293,62 @@ class TimelineRow(Static):
         color: #6e6e73;
     }
     """
+
+
+class DiffLine(Static):
+    """一行补丁：行号 gutter + 高亮代码，背景铺满整行。"""
+
+    ALLOW_SELECT = True
+    DEFAULT_CSS = """
+    DiffLine {
+        width: 100%;
+        height: 1;
+        padding: 0 1 0 2;
+    }
+    DiffLine.add { background: #daf2dc; }
+    DiffLine.del { background: #f5dade; }
+    """
+
+    def __init__(self, kind: str, ln: int, body: str, filename: str = "") -> None:
+        gutter = Text(f"{ln:>5}  ", style="#767676")
+        renderable = gutter + highlight_code_line(body, filename)
+        super().__init__(renderable, markup=False, classes=kind, expand=True)
+
+
+class DiffBlock(VerticalGroup):
+    """Edit / Write 成功后的红绿补丁。"""
+
+    DEFAULT_CSS = """
+    DiffBlock {
+        height: auto;
+        width: 100%;
+        margin: 0 0 1 0;
+        padding: 0 2 0 2;
+        layout: vertical;
+    }
+    """
+
+    def __init__(
+        self,
+        rows: List[dict],
+        extra: str = "",
+        filename: str = "",
+    ) -> None:
+        super().__init__()
+        self._rows = rows
+        self._extra = extra
+        self._filename = filename
+
+    def compose(self):
+        for row in self._rows:
+            yield DiffLine(
+                str(row.get("kind") or "ctx"),
+                int(row.get("ln") or 0),
+                str(row.get("body") or ""),
+                self._filename,
+            )
+        if self._extra:
+            yield Static(_muted(self._extra), classes="muted")
 
 
 class Prose(Static):
@@ -337,6 +444,17 @@ class SparkTui(App):
         padding: 0;
         background: #f4f4f5;
     }
+    #timeline DiffBlock {
+        width: 100%;
+        height: auto;
+    }
+    #timeline DiffLine {
+        width: 1fr;
+        height: 1;
+        padding: 0 1 0 2;
+    }
+    #timeline DiffLine.add { background: #daf2dc; }
+    #timeline DiffLine.del { background: #f5dade; }
     #status {
         height: 1;
         padding: 0 1;
@@ -571,6 +689,15 @@ class SparkTui(App):
                 self._close_prose()
             self._add_tool_row(name, args)
             self._scroll_follow()
+        elif kind in ("edit_diff", "write_diff"):
+            if self._turn is None:
+                return
+            rows = event.get("rows") or []
+            extra = str(event.get("extra") or "")
+            path = str(event.get("path") or "")
+            if rows or extra:
+                self._turn.mount(DiffBlock(rows, extra=extra, filename=path))
+                self._scroll_follow()
         elif kind == "tool_result":
             self._tools_done += 1
             if self._tools_expected and self._tools_done >= self._tools_expected:

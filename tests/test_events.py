@@ -18,6 +18,15 @@ def test_bold_verb_only_first_word():
     assert len(_clip_arg(long, 10)) <= 10
 
 
+def test_highlight_code_line_python_keywords():
+    from agent_loop.cli.tui import highlight_code_line
+
+    text = highlight_code_line("def foo():", "a.py")
+    assert text.plain.startswith("def")
+    assert "foo" in text.plain
+    assert len(text.spans) >= 2
+
+
 def test_format_grok_tool():
     assert "Read" in format_grok_tool("read", {"path": "a/tui.py"})
     assert "tui.py" in format_grok_tool("read", {"path": "a/tui.py"})

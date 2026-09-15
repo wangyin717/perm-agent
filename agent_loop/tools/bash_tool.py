@@ -4,25 +4,74 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import subprocess
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+_GUI_IN_CMD = re.compile(
+    r"\btkinter\.Tk\s*\(|\btk\.Tk\s*\(|\bTk\s*\(|pygame\.display",
+    re.I,
+)
+_PY_SCRIPT = re.compile(
+    r"(?:^|[;&\n]|&&|\|\|)\s*(?:\S*python3(?:\.\d+)?)\s+[\"']?(\S+\.py)",
+    re.I,
+)
+_GUI_IN_FILE = re.compile(
+    r"\btkinter\.Tk\s*\(|\btk\.Tk\s*\(|pygame\.display\.set_mode",
+    re.I,
+)
+
+
+def _bash_text(event: Dict[str, Any]) -> str:
+    args = event.get("args") or {}
+    return str(args.get("cmd") or args.get("command") or "")
+
+
 def before_tool_deny_rm(event: Dict[str, Any]):
     """拦住 bash 里的 rm -rf。只会被挂在 bash 名下，不会跑到别的工具上。"""
-    cmd = (event.get("args") or {}).get("cmd") or ""
-    if "rm -rf" in cmd:
+    if "rm -rf" in _bash_text(event):
         return {"block": {"reason": "dangerous command"}}
+    return None
+
+
+def before_tool_deny_gui(event: Dict[str, Any]):
+    """系统 python3 + Tk 会 Abort trap 6，弹崩溃窗。GUI 不要在 bash 里开。"""
+    cmd = _bash_text(event)
+    if _GUI_IN_CMD.search(cmd):
+        return {
+            "block": {
+                "reason": "Do not open a GUI from bash (tk.Tk / pygame). "
+                "System python3 Tk aborts on this Mac (Abort trap 6). "
+                "Use a headless unit test instead."
+            }
+        }
+    for match in _PY_SCRIPT.finditer(cmd):
+        path = match.group(1).strip("\"'")
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")[:8000]
+        except OSError:
+            continue
+        if _GUI_IN_FILE.search(text):
+            return {
+                "block": {
+                    "reason": f"Do not run {path} from bash: it creates a GUI window. "
+                    "That crashes system python3 (Abort trap 6). "
+                    "Use a headless test, or tell the user to run it themselves."
+                }
+            }
     return None
 
 
 NAME = "bash"
 REPLAY = "safe"
+READ_ONLY = False
 
 BEFORE_HOOKS = [
     before_tool_deny_rm,
+    before_tool_deny_gui,
 ]
 AFTER_HOOKS: list = []
 

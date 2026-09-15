@@ -6,12 +6,41 @@ from pathlib import Path
 
 import pytest
 
+from agent_loop import events
 from agent_loop.runtime.tool_runtime import ToolRuntime
+from agent_loop.tools.diff_view import format_write_hunk
 from agent_loop.tools.write_tool import REPLAY, execute
 
 
 def test_replay_is_never():
     assert REPLAY == "never"
+
+
+def test_format_write_hunk_create_truncates():
+    from agent_loop.tools.diff_view import DIFF_MAX_ROWS
+
+    new = "\n".join(f"L{i}" for i in range(DIFF_MAX_ROWS + 20))
+    plain, marked = format_write_hunk(None, new)
+    assert "+   1|L0" in plain
+    assert "more lines" in plain
+    assert "on #daf2dc" in marked
+    assert "-   1|" not in plain
+
+
+def test_write_emits_ui_diff(tmp_path):
+    seen = []
+    unsub = events.subscribe(lambda e: seen.append(e))
+    try:
+        asyncio.run(
+            execute({"path": "a.py", "content": "hello\n"}, workspace=str(tmp_path))
+        )
+    finally:
+        unsub()
+    diffs = [e for e in seen if e.get("kind") == "write_diff"]
+    assert len(diffs) == 1
+    assert "hello" in diffs[0]["hunk"]
+    assert diffs[0]["rows"][0]["kind"] == "add"
+    assert diffs[0]["rows"][0]["body"] == "hello"
 
 
 def test_write_creates_file(tmp_path):
@@ -22,6 +51,7 @@ def test_write_creates_file(tmp_path):
     assert "created" in out
     assert "6 bytes" in out
     assert "1 lines" in out
+    assert "+   1|hello" in out
 
 
 def test_write_overwrites_file(tmp_path):
@@ -32,6 +62,8 @@ def test_write_overwrites_file(tmp_path):
     )
     assert target.read_text(encoding="utf-8") == "new\n"
     assert "overwritten" in out
+    assert "-   1|old" in out
+    assert "+   1|new" in out
 
 
 def test_write_empty_file(tmp_path):

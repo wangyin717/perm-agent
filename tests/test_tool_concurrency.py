@@ -1,4 +1,4 @@
-"""工具并行：路径锁、bash 不加锁、准备阶段 block、terminate 投影截断、result_id 配对。"""
+"""工具并行：路径锁、bash 彼此串行、准备阶段 block、terminate 投影截断、result_id 配对。"""
 from __future__ import annotations
 
 import asyncio
@@ -130,7 +130,7 @@ def test_read_waits_for_same_path_write(tmp_path):
     assert max_inflight[0] == 1
 
 
-def test_bash_does_not_take_path_lock():
+def test_bash_calls_are_serialized():
     inflight = []
     max_inflight = [0]
     original = _patch_execute(bash_tool, inflight, max_inflight)
@@ -148,8 +148,33 @@ def test_bash_does_not_take_path_lock():
     finally:
         bash_tool.execute = original
 
-    assert max_inflight[0] == 2
+    assert max_inflight[0] == 1
     assert [r.tool_call_id for r in results] == ["a", "b"]
+    assert not any(r.is_error for r in results)
+
+
+def test_bash_still_runs_with_write_on_other_path(tmp_path):
+    inflight = []
+    max_inflight = [0]
+    orig_bash = _patch_execute(bash_tool, inflight, max_inflight)
+    orig_write = _patch_execute(write_tool, inflight, max_inflight)
+    try:
+        runtime = ToolRuntime()
+        runtime.workspace = str(tmp_path)
+        results = asyncio.run(
+            run_tool_calls(
+                runtime,
+                [
+                    _bash_call("b", "echo hi"),
+                    _write_call("w", str(tmp_path / "x.txt"), "x"),
+                ],
+            )
+        )
+    finally:
+        bash_tool.execute = orig_bash
+        write_tool.execute = orig_write
+
+    assert max_inflight[0] == 2
     assert not any(r.is_error for r in results)
 
 

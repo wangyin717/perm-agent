@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from agent_loop.session_log import SessionLog
 from agent_loop.runtime.hooks import Hooks
-from agent_loop.tools.read_tool import resolve_path
+from agent_loop.tools.read_tool import EXTRACTORS, resolve_path
 from agent_loop.runtime.records import (
     ToolResultEntry,
     ToolStartedRecord,
@@ -20,6 +20,12 @@ from agent_loop.runtime.records import (
 )
 from agent_loop.tools.registry import available_tool_names, get_tool
 from agent_loop.cli.trace import log_tool_result, log_tool_start
+
+
+@dataclass
+class _ReadSnap:
+    content: str
+    mtime_ns: int
 
 
 @dataclass
@@ -43,6 +49,7 @@ class ToolRuntime:
         self._log: Optional[SessionLog] = None
         self.workspace: Optional[str] = None
         self.session_dir: Optional[str] = None
+        self._read_snaps: Dict[str, _ReadSnap] = {}
 
     def attach_log(self, log: Optional[SessionLog]) -> None:
         self._log = log
@@ -130,6 +137,19 @@ class ToolRuntime:
         call_id = prepared.call_id
         name = prepared.name
         log_tool_start(name, started.effective_args)
+        if name in ("edit", "write"):
+            blocked = self._require_fresh_read(
+                started.effective_args, creating_ok=(name == "write")
+            )
+            if blocked:
+                return self.record_tool_result(
+                    create_error_tool_result(
+                        result_id=started.result_id,
+                        tool_call_id=call_id,
+                        tool_name=name,
+                        message=blocked,
+                    )
+                )
         try:
             content = await tool.execute(
                 started.effective_args,
@@ -162,6 +182,8 @@ class ToolRuntime:
                 )
             )
         log_tool_result(name, after.content, after.is_error)
+        if not after.is_error and name in ("read", "edit", "write"):
+            self._remember_file(started.effective_args, name)
         if after.is_error:
             return self.record_tool_result(
                 create_error_tool_result(
@@ -242,14 +264,70 @@ class ToolRuntime:
         )
         return entry
 
+    def _target_path(self, args: Dict[str, Any]) -> Optional[Path]:
+        raw = (args or {}).get("path")
+        if raw is None or not str(raw).strip():
+            return None
+        root = self.workspace or os.getcwd()
+        return resolve_path(str(raw).strip(), root)
+
+    def _require_fresh_read(self, args: Dict[str, Any], *, creating_ok: bool) -> Optional[str]:
+        path = self._target_path(args)
+        if path is None:
+            return None
+        if creating_ok and not path.exists():
+            return None
+        if not path.is_file():
+            return None
+        label = str(args.get("path") or path)
+        snap = self._read_snaps.get(str(path))
+        if snap is None:
+            return f"Read {label} before editing. Paginated reads count."
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            return None
+        if mtime_ns == snap.mtime_ns:
+            return None
+        try:
+            now = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return f"Read {label} again before editing; the file could not be compared."
+        if now == snap.content:
+            self._read_snaps[str(path)] = _ReadSnap(content=now, mtime_ns=mtime_ns)
+            return None
+        return f"File changed on disk since last read; read {label} again before editing."
+
+    def _remember_file(self, args: Dict[str, Any], tool_name: str) -> None:
+        path = self._target_path(args)
+        if path is None or not path.is_file():
+            return
+        if tool_name == "read" and path.suffix.lower() in EXTRACTORS:
+            return
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return
+        if b"\x00" in data[:8000]:
+            return
+        self._read_snaps[str(path)] = _ReadSnap(
+            content=data.decode("utf-8", errors="replace"),
+            mtime_ns=path.stat().st_mtime_ns,
+        )
+
 
 def _tool_replay(tool) -> str:
     replay = getattr(tool, "REPLAY", "never")
     return replay if replay in ("safe", "never") else "never"
 
 
+BASH_LOCK = "__bash__"
+
+
 def _lock_path(tool, args: Dict[str, Any], workspace: Optional[str]) -> Optional[str]:
-    """有 path 字段才参与路径锁；bash 等没有 path 的工具返回 None。"""
+    """有 path 才进路径锁。bash 没有 path，共用一把 __bash__ 锁，彼此串行。"""
+    if getattr(tool, "NAME", None) == "bash":
+        return BASH_LOCK
     raw = (args or {}).get("path")
     if raw is None or not str(raw).strip():
         return None

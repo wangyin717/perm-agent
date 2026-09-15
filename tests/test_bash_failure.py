@@ -144,6 +144,59 @@ def test_run_bash_timeout_retries_once_then_succeeds():
     assert sandbox.n == 2
 
 
+def test_bash_blocks_tk_in_command():
+    import json
+
+    runtime = ToolRuntime()
+    result = asyncio.run(
+        runtime.call_tool(
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "arguments": json.dumps(
+                        {"cmd": "python3 -c 'import tkinter as tk; tk.Tk()'"}
+                    ),
+                },
+            },
+            FakeSandbox(stdout="should not run"),
+        )
+    )
+    assert result.is_error is True
+    assert "Abort trap" in result.content or "GUI" in result.content
+    assert "should not run" not in result.content
+
+
+def test_bash_blocks_python_script_that_opens_tk(tmp_path):
+    script = tmp_path / "game.py"
+    script.write_text("import tkinter as tk\nroot = tk.Tk()\n", encoding="utf-8")
+    runtime = ToolRuntime()
+    result = asyncio.run(
+        runtime.call_tool(
+            _bash_call(f"python3 {script}"),
+            FakeSandbox(stdout="should not run"),
+        )
+    )
+    assert result.is_error is True
+    assert "GUI" in result.content or "tk.Tk" in result.content
+
+
+def test_bash_allows_headless_python_test(tmp_path):
+    script = tmp_path / "test_logic.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+    runtime = ToolRuntime()
+    runtime.workspace = str(tmp_path)
+    result = asyncio.run(
+        runtime.call_tool(
+            _bash_call(f"python3 {script}"),
+            FakeSandbox(stdout="ok\n"),
+        )
+    )
+    assert result.is_error is False
+    assert result.content.strip() == "ok"
+
+
 def test_run_bash_zero_exit_returns_stdout():
     out = asyncio.run(run_bash("echo hi", FakeSandbox(stdout="hi\n")))
     assert out == "hi"

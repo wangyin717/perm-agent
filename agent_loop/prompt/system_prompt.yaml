@@ -39,7 +39,19 @@ tool_notes:
 
     If bash output is long, the full log is saved under tools_result/bash/;
     grep or read that path. Do not pipe head/tail yourself.
+
+    Do not launch GUI apps from bash (tk.Tk, pygame, osascript open).
+    On this Mac, /usr/bin/python3 + Tk aborts with Abort trap 6 and a
+    crash dialog. Verify with headless tests (mock the UI). Tell the user
+    how to run the GUI themselves.
   memory_search: |
     For facts or preferences from earlier sessions, use memory_search
     (not grep on the repo). Recalled memory is historical — verify against
     the repo.
+  edit: |
+    Read the file before edit (paginated reads count). If the file changed
+    on disk since that read, read it again. Copy old from read without
+    line-number prefixes.
+  write: |
+    Overwriting an existing file requires a prior read of that path.
+    Creating a new file does not.

@@ -319,7 +319,7 @@ UTF-8 字节是通用编码体积，不是中文专用：`len(s.encode("utf-8"))
 
 `system_prompt.yaml`：
 
-- `system_prompt`：人设、怎么干活、怎么写回复。不要抄 `cmd`/`offset` 这类参数。
+- `system_prompt`：人设、怎么干活、怎么写回复。回复默认先给结论再讲为什么；短段落和 `-` 列表，不用 `一、二、三` 当骨架。短表格可以，TUI 用 Unicode 方框画。不要抄 `cmd`/`offset` 这类参数。
 - `tool_notes`：按工具名分段。`assemble` 对照 `TOOLS` 的插入顺序，**只把已启用的段**拼进 `# Tool notes`。从 registry 拿掉工具，对应段落不会再出现。
 
 现在有笔记的：`bash`（专用工具优先、别 `find $HOME`、超长落盘）、`memory_search`、`edit`、`write`。
@@ -366,15 +366,15 @@ read 分页是「全文进内存再切一页给模型」。默认也可能只返
 
 ## 13. TUI
 
-`cli/tui.py` 订 `events`，不改 jsonl。`python -m agent_loop` 开 TUI；`-s <id> "<问题>"` 仍是一次性 CLI。须用项目 `.venv`。
+`cli/tui.py` 订 `events`，不改 jsonl。`python -m agent_loop` 开 TUI；`-s <id> "<问题>"` 仍是一次性 CLI。须用项目 `.venv`。时间线滚动立刻跳（关掉 Textual 默认惯性动画），滚轮一次 4 行。
 
-过程行：灰色菱形 + 加粗动词。思考中底栏走 `Thinking… Xs`（整轮忙碌都走秒）；该段想完才在时间线落下 `Thought for Xs`。回合结束一行：
+过程行：灰色菱形 + 加粗动词。流式思维链在时间线实时走 `Thinking… Xs`，该段结束落下 `Thought for Xs`。回合结束只在时间线落一行：
 
 `Worked for 1m41s | deepseek-v4-flash | 112K / 1M`
 
 压过窗口再接 `| compacted …`。`memory flush no_reply` 不进时间线。
 
-正文是 Static + Rich 画成可选中文本；拖选后 Ctrl+C。工具/Thought 行高 1。markdown 引用块灰色，不要品红。
+正文是 Static + Rich 画成可选中文本；拖选后 Ctrl+C。标题后空一行，列表项不加倍行距。加粗、标题、表头是黑体；蓝色只留给链接、文件名（行内代码）。markdown 表格用 Unicode 方框。工具/Thought 行高 1。markdown 引用块灰色，不要品红。
 
 ---
 

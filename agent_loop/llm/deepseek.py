@@ -40,6 +40,7 @@ class LLMResponse:
     text: str = ""
     tool_calls: list = field(default_factory=list)
     stop_reason: str = "end_turn"  # end_turn | tool_use
+    finish_reason: str = ""
     usage: Optional[Dict[str, Any]] = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -137,7 +138,7 @@ class DeepSeekLLM:
         if kwargs.get("max_tokens") is not None:
             payload["max_tokens"] = kwargs["max_tokens"]
 
-        on_delta: Optional[Callable[[str], None]] = kwargs.get("on_delta")
+        on_delta: Optional[Callable[..., None]] = kwargs.get("on_delta")
         last_exc: Optional[BaseException] = None
         for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
             if abort and abort.aborted:
@@ -170,7 +171,7 @@ class DeepSeekLLM:
         self,
         payload: Dict[str, Any],
         abort: Optional[Abort] = None,
-        on_delta: Optional[Callable[[str], None]] = None,
+        on_delta: Optional[Callable[..., None]] = None,
     ) -> List[Dict[str, Any]]:
         """让真正的 HTTP 请求和"等待 abort"赛跑，谁先完成就取消另一个——
         这样 Ctrl+C 能立刻打断一个卡住的流式请求，而不用等 aiohttp 超时。
@@ -192,7 +193,7 @@ class DeepSeekLLM:
     async def _stream_once(
         self,
         payload: Dict[str, Any],
-        on_delta: Optional[Callable[[str], None]] = None,
+        on_delta: Optional[Callable[..., None]] = None,
     ) -> List[Dict[str, Any]]:
         url = f"{self.api_base}/chat/completions"
         headers = {
@@ -214,13 +215,32 @@ class DeepSeekLLM:
         return chunks
 
 
-def _emit_text_delta(obj: Dict[str, Any], on_delta: Callable[[str], None]) -> None:
+def _emit_text_delta(obj: Dict[str, Any], on_delta: Callable[..., None]) -> None:
+    """把 SSE delta 交给 on_delta(text, channel)。
+
+    channel：reasoning（思维链）/ content（正文）/ tool（只有 tool_calls，用来结束等首 token）。
+    旧的单参数回调只收 content，其它 channel 丢掉。
+    """
     choices = obj.get("choices") or []
     if not choices:
         return
-    content = ((choices[0] or {}).get("delta") or {}).get("content")
+    delta = (choices[0] or {}).get("delta") or {}
+    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+    if reasoning:
+        _notify_delta(on_delta, reasoning, "reasoning")
+    content = delta.get("content")
     if content:
-        on_delta(content)
+        _notify_delta(on_delta, content, "content")
+    elif not reasoning and delta.get("tool_calls"):
+        _notify_delta(on_delta, "", "tool")
+
+
+def _notify_delta(on_delta: Callable[..., None], text: str, channel: str) -> None:
+    try:
+        on_delta(text, channel)
+    except TypeError:
+        if channel == "content" and text:
+            on_delta(text)
 
 
 async def _abortable_sleep(seconds: float, abort: Optional[Abort]) -> None:
@@ -289,13 +309,17 @@ def parse_stream_chunks(chunks: List[Dict[str, Any]]) -> LLMResponse:
     text_parts: List[str] = []
     tools: Dict[int, Dict[str, Any]] = {}
     usage: Optional[Dict[str, Any]] = None
+    finish_reason = ""
     for data in chunks:
         if data.get("usage"):
             usage = data["usage"]
         choices = data.get("choices") or []
         if not choices:
             continue
-        delta = (choices[0] or {}).get("delta") or {}
+        choice = choices[0] or {}
+        if choice.get("finish_reason"):
+            finish_reason = str(choice["finish_reason"])
+        delta = choice.get("delta") or {}
         content = delta.get("content")
         if content:
             text_parts.append(content)
@@ -324,4 +348,5 @@ def parse_stream_chunks(chunks: List[Dict[str, Any]]) -> LLMResponse:
         response = LLMResponse(text=text, tool_calls=tool_calls, stop_reason="tool_use")
     else:
         response = LLMResponse(text=text, tool_calls=[], stop_reason="end_turn")
+    response.finish_reason = finish_reason
     return _with_usage(response, usage)

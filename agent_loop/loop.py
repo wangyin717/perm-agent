@@ -188,6 +188,7 @@ class ReactAgentLoop(AgentLoop):
         压缩：回合中途只在下一枪会超窗时压；内层停稳（或 end_turn 后改吃 steer）按 80% 压。
         """
         final_text = ""
+        empty_retries = 0
         while True:
             has_more_tools = True
             # has_more_tools 撑着内层至少跑一次；has_steer 让新插队的话有机会再挨一轮 LLM，
@@ -220,7 +221,9 @@ class ReactAgentLoop(AgentLoop):
                     messages,
                     tools=TOOL_SCHEMAS,
                     abort=abort,
-                    on_delta=lambda t: emit_event("assistant_delta", text=t),
+                    on_delta=lambda text, channel="content": emit_event(
+                        "assistant_delta", text=text, channel=channel
+                    ),
                 )
                 # 真实 usage 到手，覆盖掉本地估算——两次真实调用之间的误差不会累积。
                 tracker.update_from_response(response)
@@ -233,20 +236,32 @@ class ReactAgentLoop(AgentLoop):
                 used = response.prompt_tokens + response.completion_tokens
                 if used:
                     log_context(used, getattr(llm, "context_window", 0) or 0)
-                log_llm_text(response.text or "")
-                if response.stop_reason == "end_turn" or not response.tool_calls:
-                    # 模型说完了：只写 assistant entry，不用管 tool_calls。
-                    self._log.append_entry(
-                        "assistant",
-                        id=assistant_id,
-                        content=response.text or "",
-                    )
-                    final_text = response.text or ""
-                    has_more_tools = False
-                else:
-                    # 模型还要调工具：先落盘 assistant+tool_calls，再逐个跑，跑完继续内层。
+                if response.tool_calls:
+                    empty_retries = 0
                     log_llm_tools(response.tool_calls)
                     await self._handle_tool_calls(messages, response, assistant_id, tracker)
+                    has_more_tools = True
+                    continue
+                text = response.text or ""
+                if text.strip():
+                    empty_retries = 0
+                    log_llm_text(text)
+                    self._log.append_entry("assistant", id=assistant_id, content=text)
+                    final_text = text
+                    has_more_tools = False
+                    continue
+                # 思维链流完了但既没有正文也没有工具：当成空完成，不是成功 end_turn。
+                empty_retries += 1
+                if abort.aborted or empty_retries > 1:
+                    note = "model returned no text"
+                    if getattr(response, "finish_reason", ""):
+                        note += f" ({response.finish_reason})"
+                    emit_event("error", text=note)
+                    self._log.append_entry("assistant", id=assistant_id, content="")
+                    final_text = ""
+                    has_more_tools = False
+                else:
+                    logging.warning("[AgentLoop] empty completion, retrying")
                     has_more_tools = True
             # 内层停稳 = 一个回合结束。按 80% 压，再决定要不要吃 follow_up。
             await maybe_compact(

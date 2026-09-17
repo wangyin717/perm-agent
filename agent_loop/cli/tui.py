@@ -9,16 +9,18 @@ from io import StringIO
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from rich.console import Console
-from rich.markdown import Heading, Markdown as RichMarkdown
+from rich import box
+from rich.console import Console, ConsoleOptions, NewLine, RenderResult
+from rich.markdown import Heading, Markdown as RichMarkdown, TableElement
 from rich.style import Style
+from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 from textual.app import App, ComposeResult
 from textual.actions import SkipAction
 from textual.binding import Binding
 from pygments.token import Token
-from textual.containers import VerticalGroup, VerticalScroll
+from textual.containers import Horizontal, VerticalGroup, VerticalScroll
 from textual.markup import escape as markup_escape
 from textual.selection import Selection
 from textual.visual import RenderOptions
@@ -105,18 +107,19 @@ _TEXT = "#1c1c1e"
 _MUTED = "#6e6e73"
 _PROSE_THEME = Theme(
     {
-        "markdown.h1": Style(bold=True, color=_BLUE),
-        "markdown.h2": Style(bold=True, color=_BLUE),
-        "markdown.h3": Style(bold=True, color=_BLUE),
-        "markdown.h4": Style(color=_BLUE),
+        "markdown.h1": Style(bold=True, color=_TEXT),
+        "markdown.h2": Style(bold=True, color=_TEXT),
+        "markdown.h3": Style(bold=True, color=_TEXT),
+        "markdown.h4": Style(bold=True, color=_TEXT),
         "markdown.h5": Style(bold=True, color=_TEXT),
         "markdown.h6": Style(color=_MUTED),
+        "markdown.strong": Style(bold=True, color=_TEXT),
         "markdown.code": Style(bold=True, color=_BLUE),
         "markdown.code_block": Style(color=_BLUE),
         "markdown.link": Style(color=_BLUE, underline=True),
         "markdown.link_url": Style(color=_BLUE, underline=True),
         "markdown.list": Style(),
-        "markdown.item.number": Style(color=_BLUE),
+        "markdown.item.number": Style(color=_TEXT),
         "markdown.block_quote": Style(color=_MUTED),
         "markdown.hr": Style(color=_MUTED),
         "markdown.table.border": Style(color=_MUTED),
@@ -136,9 +139,45 @@ class _LeftHeading(Heading):
         "h6": "left",
     }
 
+    def __rich_console__(
+        self, console: Console, options: ConsoleOptions
+    ) -> RenderResult:
+        yield from super().__rich_console__(console, options)
+        yield NewLine()
+
+
+class _BoxedTable(TableElement):
+    """Grok 正文表格：Unicode 方框 + 紧凑单元格，不要 Rich SIMPLE 那种稀散对齐。"""
+
+    def __rich_console__(
+        self, console: Console, options: ConsoleOptions
+    ) -> RenderResult:
+        table = Table(
+            box=box.SQUARE,
+            pad_edge=True,
+            padding=(0, 1),
+            collapse_padding=True,
+            show_edge=True,
+            show_header=True,
+            show_lines=True,
+            expand=False,
+            style="markdown.table.border",
+            border_style="markdown.table.border",
+            header_style="markdown.table.header",
+        )
+        if self.header is not None and self.header.row is not None:
+            for column in self.header.row.cells:
+                heading = column.content.copy()
+                heading.stylize("markdown.table.header")
+                table.add_column(heading, overflow="fold", no_wrap=False)
+        if self.body is not None:
+            for row in self.body.rows:
+                table.add_row(*[element.content for element in row.cells])
+        yield table
+
 
 class ProseMarkdown(RichMarkdown):
-    """h1 左对齐；代码/标题走蓝色，不要黑底。"""
+    """h1 左对齐；表格走方框。"""
 
     def __init__(self, markup: str) -> None:
         super().__init__(
@@ -149,23 +188,39 @@ class ProseMarkdown(RichMarkdown):
         )
         self.elements = dict(RichMarkdown.elements)
         self.elements["heading_open"] = _LeftHeading
+        self.elements["table_open"] = _BoxedTable
+
+
+_MD_CACHE: Dict[Tuple[int, str], Text] = {}
+_MD_CACHE_MAX = 24
 
 
 def _markdown_as_text(src: str, width: int) -> Text:
-    """Markdown 画成 Rich Text，Textual 才能拖选/复制。"""
+    """Markdown 画成 Rich Text，Textual 才能拖选/复制。
+
+    用 record + export_text(styles=True)：capture() 会丢掉 truecolor，标题/加粗就只剩粗体。
+    """
+    key = (max(int(width), 8), src or " ")
+    cached = _MD_CACHE.get(key)
+    if cached is not None:
+        return cached.copy()
     console = Console(
         file=StringIO(),
-        width=max(int(width), 8),
+        width=key[0],
         force_terminal=True,
         color_system="truecolor",
         highlight=False,
         theme=_PROSE_THEME,
         legacy_windows=False,
+        record=True,
     )
-    with console.capture() as cap:
-        console.print(ProseMarkdown(src or " "), end="")
-    raw = cap.get().rstrip("\n") or " "
-    return Text.from_ansi(raw)
+    console.print(ProseMarkdown(src or " "), end="")
+    raw = console.export_text(styles=True).rstrip("\n") or " "
+    rendered = Text.from_ansi(raw)
+    if len(_MD_CACHE) >= _MD_CACHE_MAX:
+        _MD_CACHE.pop(next(iter(_MD_CACHE)))
+    _MD_CACHE[key] = rendered
+    return rendered.copy()
 
 
 def _bold_verb(text: str) -> str:
@@ -378,7 +433,8 @@ class Prose(Static):
         self._repaint()
 
     def on_resize(self) -> None:
-        if int(self.size.width) != self._paint_width:
+        # 滚动条出现会让宽度抖 1 列；差 1 不重画，避免滑动时整段 markdown 重渲。
+        if abs(int(self.size.width) - self._paint_width) >= 2:
             self._repaint()
 
     def _repaint(self) -> None:
@@ -404,6 +460,28 @@ class Prose(Static):
         return extracted, "\n"
 
 
+class Timeline(VerticalScroll):
+    """时间线：滚动立刻跳，不要默认的惯性动画。"""
+
+    def action_scroll_up(self) -> None:
+        self.scroll_up(animate=False, immediate=True)
+
+    def action_scroll_down(self) -> None:
+        self.scroll_down(animate=False, immediate=True)
+
+    def action_page_up(self) -> None:
+        self.scroll_page_up(animate=False, immediate=True)
+
+    def action_page_down(self) -> None:
+        self.scroll_page_down(animate=False, immediate=True)
+
+    def action_scroll_home(self) -> None:
+        self.scroll_home(animate=False, immediate=True)
+
+    def action_scroll_end(self) -> None:
+        self.scroll_end(animate=False, immediate=True)
+
+
 class SparkTui(App):
     TITLE = "spark-agent"
     ALLOW_SELECT = True
@@ -422,6 +500,8 @@ class SparkTui(App):
     #timeline {
         height: 1fr;
         background: #f4f4f5;
+        overflow-x: hidden;
+        overflow-y: scroll;
     }
     #timeline > .turn {
         height: auto;
@@ -455,17 +535,37 @@ class SparkTui(App):
     }
     #timeline DiffLine.add { background: #daf2dc; }
     #timeline DiffLine.del { background: #f5dade; }
-    #status {
-        height: 1;
+    #prompt-wrap {
+        dock: bottom;
+        height: 3;
+        margin: 0 1;
         padding: 0 1;
-        color: #6e6e73;
-        background: #ececee;
-        border-top: solid #d2d2d7;
+        background: #ffffff;
+        border: round #c7c7cc;
+        align: left middle;
+    }
+    #prompt-wrap:focus-within {
+        border: round #8e8e93;
+    }
+    #prompt-mark {
+        width: 2;
+        height: 1;
+        color: #8e8e93;
+        content-align: left middle;
     }
     #prompt {
-        dock: bottom;
+        width: 1fr;
+        height: 1;
         background: #ffffff;
-        border-top: solid #d2d2d7;
+        border: none;
+        padding: 0 1 0 0;
+    }
+    #prompt:focus {
+        border: none;
+        background-tint: 0%;
+    }
+    #prompt > .input--placeholder {
+        color: #8e8e93;
     }
     """
     BINDINGS = [
@@ -480,6 +580,7 @@ class SparkTui(App):
 
     def __init__(self, session_id: str, workspace: str) -> None:
         super().__init__()
+        self.scroll_sensitivity_y = 4.0
         self.session_id = session_id
         self.workspace = workspace
         self.loop = ReactAgentLoop(CliDeps(), None, None)
@@ -491,13 +592,12 @@ class SparkTui(App):
         self._md: Optional[Prose] = None
         self._thought: Optional[TimelineRow] = None
         self._think_t0: Optional[float] = None
+        self._had_reasoning = False
         self._busy_t0: Optional[float] = None
         self._aborting = False
         self._context_used: Optional[int] = None
         self._context_limit: Optional[int] = None
         self._compactions: List[Dict] = []
-        self._tools_expected = 0
-        self._tools_done = 0
         self._tools_shown = 0
         self._ellipsis = False
         self._follow = True
@@ -505,9 +605,10 @@ class SparkTui(App):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="chrome")
-        yield VerticalScroll(id="timeline")
-        yield Static(_IDLE, id="status")
-        yield Input(placeholder="Message or /help", id="prompt")
+        yield Timeline(id="timeline")
+        with Horizontal(id="prompt-wrap"):
+            yield Static("›", id="prompt-mark")
+            yield Input(placeholder="Message or /help", id="prompt", compact=True)
 
     def on_mount(self) -> None:
         events.print_to_stdout = False
@@ -529,43 +630,40 @@ class SparkTui(App):
             self._unsub()
             self._unsub = None
 
-    def _timeline(self) -> VerticalScroll:
+    def _timeline(self) -> Timeline:
         return self.query_one("#timeline", VerticalScroll)
 
-    def _start_turn(self, text: str, *, think: bool = True) -> VerticalGroup:
+    def _start_turn(self, text: str) -> VerticalGroup:
+        self._end_think()
         turn = VerticalGroup(classes="turn")
         self._timeline().mount(turn)
         turn.mount(UserBanner(f"›  {text}"))
         self._turn = turn
         self._md = None
         self._stream_buf = ""
-        self._tools_expected = 0
-        self._tools_done = 0
         self._tools_shown = 0
         self._ellipsis = False
         self._context_used = None
         self._context_limit = None
         self._compactions = []
-        if think:
-            self._begin_think()
         self._follow = True
         self._scroll_follow()
         return turn
 
-    def _think_elapsed(self) -> Optional[float]:
-        if self._think_t0 is None:
-            return None
-        return time.monotonic() - self._think_t0
-
     def _tick_think(self) -> None:
+        if self._aborting:
+            return
         if self._thought is not None and self._think_t0 is not None:
             self._thought.update(_thinking_line(time.monotonic() - self._think_t0))
-        if self._busy and self._busy_t0 is not None and not self._aborting:
-            self._set_status(f"Thinking… {time.monotonic() - self._busy_t0:.1f}s")
 
     def _begin_think(self) -> None:
-        if self._turn is None or self._thought is not None:
+        if self._turn is None:
+            self._start_turn("")
+        if self._thought is not None:
+            self._had_reasoning = True
             return
+        assert self._turn is not None
+        self._had_reasoning = True
         self._think_t0 = time.monotonic()
         self._thought = TimelineRow(_thinking_line(0.0), classes="thought")
         self._turn.mount(self._thought)
@@ -573,13 +671,22 @@ class SparkTui(App):
         self._scroll_follow()
 
     def _end_think(self) -> None:
-        dt = self._think_elapsed()
+        dt = None
+        if self._think_t0 is not None:
+            dt = time.monotonic() - self._think_t0
         row = self._thought
+        had = self._had_reasoning
         self._thought = None
         self._think_t0 = None
-        if dt is None or row is None:
-            return
-        row.update(_thought_line(dt))
+        self._had_reasoning = False
+        if row is not None:
+            if had and dt is not None:
+                row.update(_thought_line(dt))
+            else:
+                row.remove()
+        elif had and dt is not None and self._turn is not None:
+            self._turn.mount(TimelineRow(_thought_line(dt), classes="thought"))
+            self._scroll_follow()
 
     def _add_tool_row(self, name: str, args: Optional[Dict] = None) -> None:
         if self._turn is None:
@@ -617,7 +724,7 @@ class SparkTui(App):
             kind = row.get("kind")
             typ = row.get("type")
             if kind == "entry" and typ == "user":
-                self._start_turn(str(row.get("content") or ""), think=False)
+                self._start_turn(str(row.get("content") or ""))
             elif kind == "entry" and typ == "assistant":
                 text = str(row.get("content") or "").rstrip()
                 if text and self._turn is not None:
@@ -652,8 +759,14 @@ class SparkTui(App):
                 return
             self._start_turn(text)
         elif kind == "assistant_delta":
+            channel = str(event.get("channel") or "content")
             piece = str(event.get("text") or "")
-            if not piece:
+            if channel == "reasoning":
+                if piece:
+                    self._begin_think()
+                return
+            self._end_think()
+            if channel == "tool" or not piece:
                 return
             self._stream_buf += piece
             now = time.monotonic()
@@ -662,6 +775,7 @@ class SparkTui(App):
                 self._ensure_md().set_markdown(self._stream_buf)
                 self._scroll_follow()
         elif kind == "assistant":
+            self._end_think()
             full = str(event.get("text") or "").rstrip()
             if full:
                 self._ensure_md().set_markdown(full)
@@ -674,9 +788,6 @@ class SparkTui(App):
             self._end_think()
             if self._md is not None:
                 self._close_prose()
-            calls = event.get("tool_calls") or []
-            self._tools_expected = len(calls)
-            self._tools_done = 0
             self._tools_shown = 0
             self._ellipsis = False
         elif kind == "tool_start":
@@ -698,10 +809,6 @@ class SparkTui(App):
             if rows or extra:
                 self._turn.mount(DiffBlock(rows, extra=extra, filename=path))
                 self._scroll_follow()
-        elif kind == "tool_result":
-            self._tools_done += 1
-            if self._tools_expected and self._tools_done >= self._tools_expected:
-                self._begin_think()
         elif kind == "context":
             self._context_used = int(event.get("used") or 0)
             self._context_limit = int(event.get("limit") or 0)
@@ -714,13 +821,14 @@ class SparkTui(App):
                 }
             )
         elif kind == "error":
+            self._end_think()
             if self._turn is not None:
                 self._turn.mount(
                     TimelineRow(_mark(f"error  {event.get('text') or ''}"), classes="muted")
                 )
 
     def _set_status(self, text: str) -> None:
-        self.query_one("#status", Static).update(text)
+        return
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         text = (event.value or "").strip()
@@ -770,6 +878,7 @@ class SparkTui(App):
             self._md = None
             self._thought = None
             self._think_t0 = None
+            self._had_reasoning = False
             self._busy_t0 = None
             self._context_used = None
             self._context_limit = None
@@ -841,7 +950,7 @@ class SparkTui(App):
         if self._turn is not None:
             self._turn.mount(TimelineRow(_muted(text), classes="muted"))
             self._scroll_follow()
-        self._set_status(text)
+        self._set_status(_IDLE)
 
     def action_copy_selection(self) -> None:
         text = self.screen.get_selected_text()
@@ -859,11 +968,11 @@ class SparkTui(App):
 
     def action_page_up(self) -> None:
         self._follow = False
-        self._timeline().scroll_page_up()
+        self._timeline().scroll_page_up(animate=False, immediate=True)
 
     def action_page_down(self) -> None:
         tl = self._timeline()
-        tl.scroll_page_down()
+        tl.scroll_page_down(animate=False, immediate=True)
         if tl.max_scroll_y <= 0 or tl.scroll_y >= tl.max_scroll_y - 2:
             self._follow = True
 

@@ -15,6 +15,8 @@ def test_includes_persona_cwd_and_date(tmp_path):
     assert "mdfind -name" in text
     assert "Never `find $HOME`" in text
     assert "memory_search" in text
+    assert "short markdown table" in text
+    assert "一、" in text
     assert "offset" not in text  # 工具参数留给 schema
     assert f"Current working directory: {tmp_path.resolve().as_posix()}" in text
     assert "Today's date: 2026-09-10 (Thursday)" in text

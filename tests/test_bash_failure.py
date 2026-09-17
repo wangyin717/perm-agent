@@ -358,3 +358,48 @@ def test_loop_sees_error_and_continues(tmp_path):
     assert plan.unfinished == []
     assert any(row.get("type") == "tool_started" for row in log)
     assert any(row.get("type") == "tool_result" and row.get("is_error") for row in log)
+
+
+def test_empty_end_turn_retries_then_answers(tmp_path, monkeypatch):
+    from agent_loop import events
+
+    monkeypatch.setattr(events, "print_to_stdout", False)
+    llm = ScriptedLLM(
+        [
+            LLMResponse(text="", tool_calls=[], stop_reason="end_turn"),
+            LLMResponse(text="补上的回复", tool_calls=[], stop_reason="end_turn"),
+        ]
+    )
+    loop = ReactAgentLoop(FakeDeps(), None, None)
+    loop._llm = llm
+    answer = asyncio.run(loop._run_loop("分析市场", _uad(tmp_path)))
+    assert answer == "补上的回复"
+    assert len(llm.calls) >= 2
+
+
+def test_empty_end_turn_twice_emits_error(tmp_path, monkeypatch):
+    from agent_loop import events
+
+    monkeypatch.setattr(events, "print_to_stdout", False)
+    seen = []
+    unsub = events.subscribe(lambda e: seen.append(e))
+    try:
+        llm = ScriptedLLM(
+            [
+                LLMResponse(text="", tool_calls=[], stop_reason="end_turn", finish_reason="stop"),
+                LLMResponse(text="", tool_calls=[], stop_reason="end_turn", finish_reason="stop"),
+            ]
+        )
+        loop = ReactAgentLoop(FakeDeps(), None, None)
+        loop._llm = llm
+        answer = asyncio.run(loop._run_loop("分析市场", _uad(tmp_path)))
+    finally:
+        unsub()
+    assert answer == ""
+    errors = [e for e in seen if e.get("kind") == "error"]
+    assert errors, seen
+    assert "model returned no text" in str(errors[0].get("text") or "")
+    log = SessionLog(session_log_path(_uad(tmp_path))).read_all()
+    assistants = [r for r in log if r.get("type") == "assistant"]
+    assert assistants
+    assert (assistants[-1].get("content") or "") == ""

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from agent_loop.runtime.tool_runtime import ToolRuntime
 from agent_loop.runtime.records import ToolResultEntry, create_error_tool_result
+from agent_loop.tools.read_tool import IMAGE_OMIT_NOTE, encode_image_data_url
 from agent_loop.tools.registry import get_tool
 
 
@@ -177,7 +178,57 @@ def visible_entries(rows: List[Dict[str, Any]], covers_upto_seq: int) -> List[Di
     ]
 
 
-def entries_to_messages(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def tool_result_api_messages(
+    row: Dict[str, Any],
+    content: str,
+    *,
+    supports_images: bool,
+    attach_media: bool,
+) -> List[Dict[str, Any]]:
+    """tool 结果投影。DeepSeek Chat Completions 只允许 user 带图，所以图跟在 tool 后面一条 user 上。"""
+    text = content
+    media = row.get("media") if attach_media else None
+    if isinstance(media, dict) and media.get("kind") == "image":
+        if not supports_images:
+            text = f"{content.rstrip()}\n{IMAGE_OMIT_NOTE}"
+            media = None
+    msgs: List[Dict[str, Any]] = [
+        {
+            "role": "tool",
+            "tool_call_id": row.get("tool_call_id") or "",
+            "name": row.get("tool_name") or "",
+            "content": text,
+        }
+    ]
+    if isinstance(media, dict) and media.get("kind") == "image":
+        path = str(media.get("path") or "")
+        mime = str(media.get("mime") or "image/png")
+        data_url = encode_image_data_url(path, mime) if path else None
+        if data_url:
+            from pathlib import Path as _Path
+
+            name = _Path(path).name
+            logging.info("[llm] attached image: %s", name)
+            msgs.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"[image from read: {name}]"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url},
+                        },
+                    ],
+                }
+            )
+        else:
+            msgs[0]["content"] = f"{text.rstrip()}\n[Image file missing or unreadable.]"
+    return msgs
+
+
+def entries_to_messages(
+    rows: List[Dict[str, Any]], *, supports_images: bool = False
+) -> List[Dict[str, Any]]:
     """jsonl 里的 entry 投影成 LLM messages。record 不进上下文。
 
     压缩产生的两类 meta entry 在这里生效：
@@ -256,14 +307,15 @@ def entries_to_messages(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         messages.append(msg)
         for row in ordered:
             result_id = row.get("result_id") or ""
+            redacted = result_id in redactions
             content = redactions.get(result_id, row.get("content") or "")
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": row.get("tool_call_id") or "",
-                    "name": row.get("tool_name") or "",
-                    "content": content,
-                }
+            messages.extend(
+                tool_result_api_messages(
+                    row,
+                    content,
+                    supports_images=supports_images,
+                    attach_media=not redacted,
+                )
             )
         pending_assistant = None
         pending_results = []
@@ -283,14 +335,15 @@ def entries_to_messages(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 pending_results.append(row)
             else:
                 result_id = row.get("result_id") or ""
+                redacted = result_id in redactions
                 content = redactions.get(result_id, row.get("content") or "")
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": row.get("tool_call_id") or "",
-                        "name": row.get("tool_name") or "",
-                        "content": content,
-                    }
+                messages.extend(
+                    tool_result_api_messages(
+                        row,
+                        content,
+                        supports_images=supports_images,
+                        attach_media=not redacted,
+                    )
                 )
     flush_assistant()
     return messages

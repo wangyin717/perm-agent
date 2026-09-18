@@ -87,6 +87,158 @@ def test_prompt_wraps_chevron():
     asyncio.run(_run())
 
 
+def test_resume_lists_and_replays_history(tmp_path, monkeypatch):
+    from agent_loop.cli.tui import Prose, SessionPickRow, UserBanner
+    from agent_loop.paths import session_log_path_for
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    log = session_log_path_for(ws, "cli-old", home=home)
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        '{"kind":"entry","type":"user","content":"hello history"}\n'
+        '{"kind":"entry","type":"assistant","content":"hi from the past"}\n',
+        encoding="utf-8",
+    )
+
+    async def _run() -> None:
+        app = SparkTui("current", str(ws))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app._run_command("resume", "/resume")
+            await pilot.pause()
+            picks = list(app.query(SessionPickRow))
+            assert len(picks) == 1
+            assert "hello history" in str(picks[0].content)
+            assert "selected" in picks[0].classes
+            picks[0].on_click()
+            await pilot.pause()
+            assert app.session_id == "cli-old"
+            banners = [str(w.content) for w in app.query(UserBanner)]
+            assert any("hello history" in b for b in banners), banners
+            prose = "\n".join(str(w._src) for w in app.query(Prose))
+            assert "hi from the past" in prose
+
+    asyncio.run(_run())
+
+
+def test_resume_escape_restores_session(tmp_path, monkeypatch):
+    from agent_loop.cli.tui import ResumePicker, UserBanner
+    from agent_loop.paths import session_log_path_for
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    log = session_log_path_for(ws, "stay-here", home=home)
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        '{"kind":"entry","type":"user","content":"keep this chat"}\n',
+        encoding="utf-8",
+    )
+    other = session_log_path_for(ws, "other-one", home=home)
+    other.parent.mkdir(parents=True)
+    other.write_text(
+        '{"kind":"entry","type":"user","content":"another"}\n',
+        encoding="utf-8",
+    )
+
+    async def _run() -> None:
+        app = SparkTui("stay-here", str(ws))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app._run_command("resume", "/resume")
+            await pilot.pause()
+            assert list(app.query(ResumePicker))
+            await app._resume_cancel()
+            await pilot.pause()
+            assert not list(app.query(ResumePicker))
+            assert app.session_id == "stay-here"
+            banners = [str(w.content) for w in app.query(UserBanner)]
+            assert any("keep this chat" in b for b in banners), banners
+
+    asyncio.run(_run())
+
+
+def test_resume_keyboard_opens_selected(tmp_path, monkeypatch):
+    from agent_loop.cli.tui import ResumePicker, SessionPickRow
+    from agent_loop.paths import session_log_path_for
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    for i, sid in enumerate(("first-a", "second-b")):
+        path = session_log_path_for(ws, sid, home=home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f'{{"kind":"entry","type":"user","content":"{sid} title"}}\n',
+            encoding="utf-8",
+        )
+        import os
+        import time
+
+        os.utime(path, (time.time() + i, time.time() + i))
+
+    async def _run() -> None:
+        app = SparkTui("current", str(ws))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app._run_command("resume", "/resume")
+            await pilot.pause()
+            picker = app.query_one(ResumePicker)
+            picker.focus()
+            await pilot.pause()
+            picker.action_cursor_down()
+            await pilot.pause()
+            picks = list(app.query(SessionPickRow))
+            assert "selected" in picks[1].classes
+            picker.action_open_selected()
+            await pilot.pause()
+            assert app.session_id == "first-a"
+
+    asyncio.run(_run())
+
+
+def test_resume_pages_and_click(tmp_path, monkeypatch):
+    from agent_loop.cli.tui import ResumePageRow, SessionPickRow
+    from agent_loop.paths import session_log_path_for
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    for i in range(12):
+        path = session_log_path_for(ws, f"s{i:02d}", home=home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f'{{"kind":"entry","type":"user","content":"q{i}"}}\n',
+            encoding="utf-8",
+        )
+        import os
+        import time
+
+        os.utime(path, (time.time() + i, time.time() + i))
+
+    async def _run() -> None:
+        app = SparkTui("current", str(ws))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app._run_command("resume", "/resume")
+            await pilot.pause()
+            assert len(list(app.query(SessionPickRow))) == 10
+            nav = list(app.query(ResumePageRow))
+            assert nav and nav[0].delta == 1
+            nav[0].on_click()
+            await pilot.pause()
+            rest = list(app.query(SessionPickRow))
+            assert len(rest) == 2
+            sid = rest[0].session_id
+            rest[0].on_click()
+            await pilot.pause()
+            assert app.session_id == sid
+
+    asyncio.run(_run())
+
+
 def test_thinking_then_thought():
     asyncio.run(_run())
 
@@ -102,7 +254,7 @@ def test_prose_key_text_is_blue():
     assert "loop.py" in rendered.plain
     bold_start = rendered.plain.find("今晚不发射")
     code_start = rendered.plain.find("loop.py")
-    blue = (26, 115, 232)
+    blue = (47, 100, 210)
 
     def _color_at(index: int):
         for span in rendered.spans:
@@ -124,6 +276,20 @@ def test_prose_list_is_not_double_spaced():
     between = plain[i:j]
     assert "第一点" in plain and "第二点" in plain
     assert between.count("\n\n") == 0
+
+
+def test_scroll_follow_stays_off_when_user_scrolled():
+    async def _run() -> None:
+        app = SparkTui("follow-test", "/tmp/spark-agent-tui-follow")
+        async with app.run_test(size=(80, 24)) as pilot:
+            app._start_turn("q")
+            app._follow = False
+            app._handle_event({"kind": "assistant_delta", "text": "hello "})
+            app._handle_event({"kind": "assistant", "text": "hello world"})
+            await pilot.pause()
+            assert app._follow is False
+
+    asyncio.run(_run())
 
 
 def test_markdown_table_draws_box():

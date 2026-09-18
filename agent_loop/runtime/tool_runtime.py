@@ -13,6 +13,7 @@ from agent_loop.session_log import SessionLog
 from agent_loop.runtime.hooks import Hooks
 from agent_loop.tools.read_tool import EXTRACTORS, resolve_path
 from agent_loop.runtime.records import (
+    ToolOutput,
     ToolResultEntry,
     ToolStartedRecord,
     create_error_tool_result,
@@ -151,17 +152,24 @@ class ToolRuntime:
                     )
                 )
         try:
-            content = await tool.execute(
+            raw = await tool.execute(
                 started.effective_args,
                 sandbox,
                 workspace=self.workspace,
                 session_dir=self.session_dir,
             )
+            media = None
+            if isinstance(raw, ToolOutput):
+                content = raw.content
+                media = raw.media
+            else:
+                content = str(raw)
             is_error = False
         except Exception as exc:
             # execute 允许直接 throw；这里统一收口成错误结果，循环不会因为异常中断。
             logging.warning("[tool] %s failed: %s", name, exc)
             content = str(exc)
+            media = None
             is_error = True
         try:
             after = await self.hooks.run_after_tool(
@@ -202,6 +210,7 @@ class ToolRuntime:
                 content=after.content,
                 is_error=False,
                 terminate=after.terminate,
+                media=media,
             )
         )
 
@@ -247,8 +256,7 @@ class ToolRuntime:
         """
         self.tool_result_records.append(entry)
         if self._log:
-            self._log.append_entry(
-                "tool_result",
+            payload = dict(
                 result_id=entry.result_id,
                 tool_call_id=entry.tool_call_id,
                 tool_name=entry.tool_name,
@@ -256,6 +264,21 @@ class ToolRuntime:
                 is_error=entry.is_error,
                 terminate=entry.terminate,
             )
+            if entry.media:
+                payload["media"] = entry.media
+            self._log.append_entry("tool_result", **payload)
+            media = entry.media
+            if isinstance(media, dict) and media.get("kind") == "image":
+                path = str(media.get("path") or "")
+                name = Path(path).name if path else ""
+                self._log.append_record(
+                    "image_attached",
+                    tool_call_id=entry.tool_call_id,
+                    name=name,
+                    mime=media.get("mime") or "",
+                    path=path,
+                )
+                logging.info("[llm] attached image: %s", name)
         logging.debug(
             "[tool_result] result_id=%s tool=%s is_error=%s",
             entry.result_id,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
 
@@ -32,6 +32,14 @@ class ToolStartedRecord:
 
 
 @dataclass
+class ToolOutput:
+    """execute 的可选返回值：普通工具继续 return str。"""
+
+    content: str
+    media: Optional[Dict[str, Any]] = None
+
+
+@dataclass
 class ToolResultEntry:
     """执行后写入会话的条目。成功路径必须沿用 started.result_id。"""
 
@@ -41,6 +49,7 @@ class ToolResultEntry:
     content: str
     is_error: bool = False
     terminate: bool = False
+    media: Optional[Dict[str, Any]] = None
 
     def to_message(self) -> Dict[str, Any]:
         return {

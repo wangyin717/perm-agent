@@ -12,7 +12,7 @@ def test_bold_verb_only_first_word():
     out = _bold_verb("Read  tui.py")
     assert out.startswith("[bold]Read[/]")
     assert "tui.py" in out
-    assert "#6e6e73" in out
+    assert "#767676" in out
     long = "x" * 200
     assert _clip_arg(long, 10).endswith("…")
     assert len(_clip_arg(long, 10)) <= 10
@@ -40,6 +40,10 @@ def test_parse_slash():
     assert parse_slash("/new") == "new"
     assert parse_slash("/help") == "help"
     assert parse_slash("/session") == "session"
+    assert parse_slash("/resume") == "resume"
+    assert parse_slash("/resume 2") == "resume"
+    assert parse_slash("/rename hello") == "rename"
+    assert parse_slash("/title x") == "rename"
     assert parse_slash("hello") is None
     assert parse_slash("/unknown") is None
 

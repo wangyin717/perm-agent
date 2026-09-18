@@ -5,16 +5,18 @@
   memory/MEMORY.md
   memory/YYYY-MM-DD-slug-{sessionId}.md
   chats/{sessionId}/session.jsonl
+  chats/{sessionId}/title.json
   chats/{sessionId}/workspace/tools_result/…
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 PathLike = Union[str, Path]
 
@@ -54,6 +56,66 @@ def session_log_path_for(
     home: Optional[PathLike] = None,
 ) -> Path:
     return session_dir(workspace, session_id, home) / "session.jsonl"
+
+
+def _first_user_preview(log_path: Path, limit: int = 48) -> str:
+    try:
+        with open(log_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                if row.get("kind") == "entry" and row.get("type") == "user":
+                    text = " ".join(str(row.get("content") or "").split())
+                    if len(text) > limit:
+                        return text[: limit - 1] + "…"
+                    return text
+    except (OSError, json.JSONDecodeError, TypeError):
+        return ""
+    return ""
+
+
+def list_sessions(workspace: PathLike, home: Optional[PathLike] = None) -> List[Dict[str, Any]]:
+    """当前项目下的会话，按 jsonl 修改时间新的在前。没有日志文件的目录不算。"""
+    chats = project_dir(workspace, home) / "chats"
+    if not chats.is_dir():
+        return []
+    items: List[Dict[str, Any]] = []
+    for child in chats.iterdir():
+        if not child.is_dir():
+            continue
+        log = child / "session.jsonl"
+        if not log.is_file():
+            continue
+        try:
+            mtime = log.stat().st_mtime
+        except OSError:
+            continue
+        preview = _first_user_preview(log)
+        title = ""
+        manual = False
+        meta_path = child / "title.json"
+        if meta_path.is_file():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                if isinstance(meta, dict):
+                    title = str(meta.get("title") or "").strip()
+                    manual = bool(meta.get("title_is_manual"))
+            except (OSError, json.JSONDecodeError, TypeError):
+                pass
+        items.append(
+            {
+                "id": child.name,
+                "mtime": mtime,
+                "preview": preview,
+                "title": title or preview or child.name,
+                "title_is_manual": manual,
+                "path": log,
+            }
+        )
+    items.sort(key=lambda row: float(row["mtime"]), reverse=True)
+    return items
 
 
 def session_log_path(user_action_data: Dict[str, Any]) -> Path:

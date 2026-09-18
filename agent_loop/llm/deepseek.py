@@ -21,6 +21,12 @@ CONTEXT_WINDOWS = {
     "deepseek-v4-pro": 1_000_000,
 }
 DEFAULT_CONTEXT_WINDOW = 1_000_000
+# 文档：deepseek-flash 支持图像理解；旧 vision-exp 由 Flash 承接。
+VISION_MODELS = {
+    "deepseek-flash",
+    "deepseek-v4-flash",
+    "deepseek-v4-flash-vision-exp",
+}
 
 # 第 1 次不算重试；最多再试 2 次
 LLM_MAX_ATTEMPTS = 3
@@ -116,6 +122,11 @@ class DeepSeekLLM:
         self.api_base = (api_base or API_BASE).rstrip("/")
         self.timeout = timeout
         self.context_window = CONTEXT_WINDOWS.get(self.model, DEFAULT_CONTEXT_WINDOW)
+
+    @property
+    def supports_images(self) -> bool:
+        name = (self.model or "").strip().lower()
+        return name in VISION_MODELS or "vision" in name
 
     async def call(
         self,

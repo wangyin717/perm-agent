@@ -94,6 +94,8 @@ def test_clip_flush_limits_bullets_and_drops_debug():
 
 
 def test_parse_flush_and_append(tmp_path):
+    from datetime import datetime
+
     assert parse_flush_text("NO_REPLY") is None
     assert parse_flush_text("just prose") is None
     body = "## Decisions\n- ship it\n"
@@ -101,11 +103,13 @@ def test_parse_flush_and_append(tmp_path):
     assert parsed is not None
     assert "ship it" in parsed
     dest = tmp_path / "note.md"
-    write_flush(dest, body)
-    write_flush(dest, "## Technical context\npytest\n")
+    write_flush(dest, body, now=datetime(2026, 9, 17, 17, 41))
+    write_flush(dest, "## Technical context\npytest\n", now=datetime(2026, 9, 17, 18, 2))
     text = dest.read_text(encoding="utf-8")
+    assert text.startswith("<!-- flush 20260917 17:41 -->")
+    assert "<!-- flush 20260917 18:02 -->" in text
     assert text.count("---") == 1
-    assert "flush" in text
+    assert text.index("17:41") < text.index("---") < text.index("18:02")
 
 
 def test_parse_dream_and_gates(tmp_path, monkeypatch):

@@ -153,10 +153,10 @@ def medium_path(workspace: str, session_id: str, first_user: str, now: Optional[
 
 def write_flush(path: Path, body: str, now: Optional[datetime] = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    stamp = (now or datetime.now()).strftime("%H:%M")
-    block = body.rstrip() + "\n"
+    stamp = (now or datetime.now()).strftime("%Y%m%d %H:%M")
+    block = f"<!-- flush {stamp} -->\n\n" + body.rstrip() + "\n"
     if path.is_file() and path.stat().st_size > 0:
-        block = f"\n---\n<!-- flush {stamp} -->\n\n" + block
+        block = "\n---\n" + block
     with open(path, "a", encoding="utf-8") as f:
         f.write(block)
 

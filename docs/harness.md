@@ -7,7 +7,7 @@
 
 密钥：仓库根 `.env`（`DEEPSEEK_API_KEY`、`PERPLEXITY_API_KEY`），启动时 `envfile.load_dotenv()` 读入；已有环境变量不覆盖。`.env` 不进 git，`.env.example` 只有变量名。
 
-蓝图：`docs/blueprint.html`。跨会话 memory：`docs/memory.md`。
+跨会话 memory 见 §4。
 
 ---
 
@@ -144,24 +144,99 @@ end_turn 之后才进的 steer 当成**新回合**：先按 60% 做压缩，再�
 
 ## 4. 家目录（会话 + 记忆）
 
-不写进用户仓库。`SPARK_AGENT_HOME` 可改根目录，默认 `~/.spark-agent`（权限 700）。细节见 `docs/memory.md`。
+不写进用户仓库。`SPARK_AGENT_HOME` 可改根，默认 `~/.spark-agent`（创建时尽量 `chmod 700`）。`{slug}-{hash}` 见 `paths.py`：目录名 + 仓库绝对路径 sha256 前 8 位。同一路径稳定，不进 git。
+
+jsonl 不是 memory。压缩摘要也不是 memory。`AGENTS.md` 是人写的项目说明书，开场已经拼进 system，不要再叫 memory。
 
 ```text
 ~/.spark-agent/MEMORY.md                      全局长期
+
 ~/.spark-agent/projects/{slug}-{hash}/
   memory/MEMORY.md                            项目长期（Dream 覆盖）
   memory/YYYY-MM-DD-slug-{sessionId}.md       Flush 中期
   memory/activity.jsonl
   chats/{sessionId}/session.jsonl             本轮对话
+  chats/{sessionId}/title.json                显示名（目录名仍是 id）
   chats/{sessionId}/workspace/tools_result/
     grep/  web_fetch/  read/  bash/           草稿纸，不进 jsonl
 ```
 
-`{slug}-{hash}` 由仓库目录名 + 绝对路径 sha256 前 8 位得出。同一路径稳定，不进 git。
-
 草稿纸在会话目录下，**不进 jsonl**，不进模型投影。`ToolRuntime.session_dir` = jsonl 的父目录。`workspace` 仍是用户仓库根，搜代码用这个。
 
 fetch / 长文档 / 长 bash 的 `saved:` 多为家目录绝对路径（相对 workspace 算不出来时）；grep / read 那条路径时用 `path=` 指向该文件。
+
+### 4.1 三层
+
+| 层 | 是什么 | 文件 | 谁写 | 谁读 |
+|---|---|---|---|---|
+| 短期 | 本轮对话 | `chats/{sessionId}/session.jsonl` | loop | 本 session 投影 |
+| 中期 | 这一次聊里可复用的事实 | `memory/YYYY-MM-DD-slug-{sessionId}.md` | Flush | Dream、`memory_search` |
+| 长期（项目） | 这个仓库仍然成立的约定 | `memory/MEMORY.md` | Dream（整份覆盖） | `memory_search` / `memory_get` |
+| 长期（全局） | 跨项目的人的偏好 | `~/.spark-agent/MEMORY.md` | 人改或工具写；v1 Dream 不自动改 | 同上 |
+
+短期跟**这一次聊天**走，在 `{sessionId}/` 里。  
+中期和项目长期跟**这个仓库**走，和所有 `{sessionId}` 平级，都在 `memory/`。  
+不要把 `MEMORY.md` 放进某一个 `chats/{sessionId}/`。
+
+`memory/` 里靠文件名区分：`MEMORY.md` 是项目长期，`YYYY-MM-DD-*.md` 是中期。列中期时用日期前缀过滤，不要 `*.md` 一把抓。`memory_search` 只扫 `memory/` + 全局 `MEMORY.md`，**不要扫 `chats/`**。
+
+每次 Flush / Dream 往 `memory/activity.jsonl` 追加一行（`no_reply` / `wrote` / `error`）。Dream 因门没过不写这一行。TUI 和 CLI 也会打 `[memory:flush] no_reply` 这类过程日志。
+
+### 4.2 Flush（写中期）
+
+另打一枪模型，不是压缩。压缩把本轮窗口里的旧对话换成短摘要，写进 jsonl，给**下一枪同一个 session**。Flush 从刚停稳的对话里抽出「以后还用得上的」，写成中期 markdown。
+
+**何时：** 一次用户问题完整停稳之后（内层没有 tool、也没有 follow_up）。不是每个 tool_result 之后。v1 不必等 TUI 空闲定时器。
+
+**写到哪：** `projects/{slug}-{hash}/memory/YYYY-MM-DD-{slug}-{sessionId}.md`
+
+- `YYYY-MM-DD`：当天日期
+- `slug`：用户第一句话压成短、文件系统安全的一小段
+- `sessionId`：与 `chats/` 下目录名相同
+
+同一 session 再 Flush 一次：**还是这个文件**，用 `---` 隔开再 append，不要新开日历文件。每次写成（含第一次）都带时间戳：`<!-- flush 20260917 17:41 -->`。
+
+**正文：** 必须带 `##` 主题标题（没有 `##` 整份丢掉）。短：每节最多 3 条、全文最多 12 条，目标 ≤1500 字，写盘硬顶 2000。空主题整节省略。主题对齐 Grok：Decisions & rationale、Technical context、Debugging techniques、Problems & solutions。不要写 Current state / Next steps（那是压缩摘要）。不要写 OS/编辑器等偏好（那是全局 `MEMORY.md`）。不要复述工具过程。
+
+**`NO_REPLY`：** 例行问答、没新决定、没新发现，模型只回复 `NO_REPLY`。程序看到空、就是 `NO_REPLY`、或没有 `##` → **文件不写、不 append**。
+
+Flush 和压缩摘要必须两套提示词、两处落盘，不能共用。
+
+### 4.3 Dream（收成项目长期）
+
+另打一枪模型。默认 **只更新项目** `memory/MEMORY.md`，不是两次模型。
+
+**输入：** 近期 `YYYY-MM-DD-*.md` + 现有项目 `MEMORY.md`。  
+**输出：** 一整份新的 markdown **覆盖** `memory/MEMORY.md`（合并、改掉过时事实、丢掉流水）。不是 append。有字数上限，超了就在这一次生成时压条目。
+
+提示词要点：相关的合成一个主题；新事实推翻旧的；「昨天」改成绝对日期；丢掉问候、工具噪音、Current state、Next steps、已在全局里的偏好；留下决定、架构、问题/修法；没什么可留就 `NO_REPLY`，长期文件不动。
+
+全局 `~/.spark-agent/MEMORY.md`：v1 靠人改或以后的 memory 工具写。不要每闲一次用同一堆中期再 dream 一遍全局。
+
+**何时跑：** 不是系统守护进程。CLI 跑完就退出，v1 在进程 `return` 前过门再试一次。门：距上次成功 Dream 够小时数；上次之后新中期文件够份数；文件锁。关会话不跑 Dream。以后有常驻 TUI，再加循环里的定时器。
+
+### 4.4 召回
+
+两个工具，模型需要时再调。开场 **不** 自动把中期/长期灌进 system（AGENTS.md + cwd + 日期已经在）。压缩后再搜一次 v1 不做。
+
+v1 **一个工具** `memory_search`：
+
+- `query`：AND 关键词，按 `##` 切块，搜项目 MEMORY.md → 中期（新的在前）→ 全局
+- `path`：短名读一份（`MEMORY.md` / `global/MEMORY.md` / `YYYY-MM-DD-*.md`）；可加 `offset`/`limit`
+- 两个都有：只在该文件里搜
+- 两个都空：拦住
+
+短名不要拼家目录绝对路径。不出 `memory/` 沙箱。默认最多 8 条。不上 FTS/向量。
+
+### 4.5 和现有模块的边界
+
+| 已有 | 不要当成 memory |
+|---|---|
+| jsonl / 压缩摘要 | 本 session 窗口 |
+| `AGENTS.md` 拼进 system | 人写的项目说明书 |
+| grep/fetch 快照 | 这一次工具原文，在 `chats/{id}/workspace/tools_result/` |
+
+路径、`memory_search`、Flush（回合停稳）、Dream（过门后覆盖项目 MEMORY.md）已落地。v1 召回只有一个工具。TUI 闲时定时器未接。开场自动注入、压缩后补召回、FTS 需要时再加。
 
 | kind | type | 是什么 | 进模型吗 |
 |---|---|---|---|
@@ -298,7 +373,7 @@ Ctrl+C：`Abort` 打断退避和卡住的 POST（`RetryCancelledError`）。不�
 
 | 工具 | 要点 |
 |---|---|
-| read | 文本：`offset`（1-based）/`limit`，默认最多 1000 行或 10 万字节，footer 写下一页 `offset`。pdf/docx/xlsx 用打包的 pypdf / python-docx / openpyxl 抽成文本：≤8000 字符内联；更长写入 `tools_result/read/<hash>.txt`，结果只留预览和路径。扫描件抽不出字则报错。图片仍当二进制拒绝。`REPLAY=safe` |
+| read | 文本：`offset`（1-based）/`limit`，默认最多 1000 行或 10 万字节，footer 写下一页 `offset`。pdf/docx/xlsx 抽成文本（≤8k 内联，更长落盘）。jpeg/png/gif/webp 按文件头识别，jsonl 只记 `media.path`，并写一条不含像素的 `image_attached` record。投影时 tool 仍是文字，图挂在紧挨着的 `user`（DeepSeek 只允许 user 带图）。模型无视觉则 Pi 式省略说明。`REPLAY=safe` |
 | write | 整文件；覆盖已有文件须先 read（见 §12）；新建不需要。`REPLAY=never`；缺目录 mkdir |
 | edit | 精确字符串替换；空 old 在 before_tool 拦住；须先 read（分页也算）；成功后 TUI 画红绿 hunk。`REPLAY=never` |
 | grep | 正则；第一页 20 条；完整命中写入 `tools_result/grep/<id>`；footer 带 cursor 则再调 grep 只传 cursor；无 `session_dir` 不写盘、不给 cursor |
@@ -311,7 +386,7 @@ web_search 的 DuckDuckGo 在独立子进程里跑 `ddgs`，30 秒杀不掉就 S
 
 UTF-8 字节是通用编码体积，不是中文专用：`len(s.encode("utf-8"))`。中文同等字符数会先碰到 50KB。
 
-附件：没有正规 PDF 工具通道。文字型 pdf/docx/xlsx 走 `read` 的抽取库（打进依赖）。模型用 bash 现写 `pypdf` 脚本不稳。扫描件、图片、音视频仍不行。
+附件：文字型 pdf/docx/xlsx 走 `read` 抽取。jpeg/png/gif/webp 走 `read` 的图像路径（jsonl 不存 base64）。扫描 PDF、音视频仍不行。
 
 ---
 
@@ -319,7 +394,7 @@ UTF-8 字节是通用编码体积，不是中文专用：`len(s.encode("utf-8"))
 
 `system_prompt.yaml`：
 
-- `system_prompt`：人设、怎么干活、怎么写回复。回复默认先给结论再讲为什么；短段落和 `-` 列表，不用 `一、二、三` 当骨架。短表格可以，TUI 用 Unicode 方框画。不要抄 `cmd`/`offset` 这类参数。
+- `system_prompt`：人设、怎么干活、怎么写回复。回复默认先给结论再讲为什么；短段落和 `-` 列表。短表格可以，TUI 用 Unicode 方框画。不要抄 `cmd`/`offset` 这类参数。
 - `tool_notes`：按工具名分段。`assemble` 对照 `TOOLS` 的插入顺序，**只把已启用的段**拼进 `# Tool notes`。从 registry 拿掉工具，对应段落不会再出现。
 
 现在有笔记的：`bash`（专用工具优先、别 `find $HOME`、超长落盘）、`memory_search`、`edit`、`write`。
@@ -366,7 +441,7 @@ read 分页是「全文进内存再切一页给模型」。默认也可能只返
 
 ## 13. TUI
 
-`cli/tui.py` 订 `events`，不改 jsonl。`python -m agent_loop` 开 TUI；`-s <id> "<问题>"` 仍是一次性 CLI。须用项目 `.venv`。时间线滚动立刻跳（关掉 Textual 默认惯性动画），滚轮一次 4 行。
+`cli/tui.py` 订 `events`，不改 jsonl。`python -m agent_loop` 开 TUI；`-s <id> "<问题>"` 仍是一次性 CLI。须用项目 `.venv`。`/new` 开空白会话；`/resume` 列出本项目会话（每页 10 条，点行或 ↑↓ 加回车进入，←→ 翻页），也可用 `/resume 1` 或 `/resume <id>`。标题在 `chats/{id}/title.json`（目录名仍是 id）：首条用户话自动写入，`/rename` 记 `title_is_manual`。时间线滚动立刻跳（关掉 Textual 默认惯性动画），滚轮一次 4 行。
 
 过程行：灰色菱形 + 加粗动词。流式思维链在时间线实时走 `Thinking… Xs`，该段结束落下 `Thought for Xs`。回合结束只在时间线落一行：
 
@@ -398,8 +473,6 @@ read 分页是「全文进内存再切一页给模型」。默认也可能只返
 2. schema 与 registry 合成一份  
 3. 需要时再做 bash 流式落盘  
 
-memory 路径见 `docs/memory.md`。
-
 ---
 
 ## 文件对照
@@ -418,9 +491,7 @@ cli/tui.py              Grok 风格时间线
 cli/app.py              入口
 cli/trace.py            终端过程日志 + events
 events.py               内核 → 界面
-docs/blueprint.html     模块蓝图
-docs/memory.md          跨会话 memory
-docs/harness.md         本文
+docs/harness.md         本文（含跨会话 memory）
 ```
 
 独立入口：`python -m agent_loop` 打开 TUI；`python -m agent_loop -s <id> "<问题>"` 仍是一次性 CLI。

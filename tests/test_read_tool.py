@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -206,3 +207,108 @@ def test_runtime_read_ok(tmp_path, monkeypatch):
     )
     assert result.is_error is False
     assert "     1|hi" in result.content
+
+
+def _min_png() -> bytes:
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    raw = zlib.compress(b"\x00\xff\x00\x00")
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", raw) + chunk(b"IEND", b"")
+
+
+def test_sniff_image_png_jpeg_webp():
+    from agent_loop.tools.read_tool import sniff_image
+
+    assert sniff_image(_min_png())[0] == "image/png"
+    assert sniff_image(b"\xff\xd8\xff\xe0xxxx")[0] == "image/jpeg"
+    assert sniff_image(b"RIFF\x00\x00\x00\x00WEBP....")[0] == "image/webp"
+    assert sniff_image(b"not an image") is None
+
+
+def test_read_png_returns_media_and_copies(tmp_path):
+    from agent_loop.runtime.records import ToolOutput
+
+    png = tmp_path / "shot.png"
+    png.write_bytes(_min_png())
+    session = tmp_path / "chat"
+    out = asyncio.run(
+        execute(
+            {"path": "shot.png"},
+            workspace=str(tmp_path),
+            session_dir=str(session),
+        )
+    )
+    assert isinstance(out, ToolOutput)
+    assert "Read image file [image/png]" in out.content
+    assert out.media["kind"] == "image"
+    assert out.media["mime"] == "image/png"
+    saved = Path(out.media["path"])
+    assert saved.is_file()
+    assert saved.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_read_image_jsonl_has_media_not_base64(tmp_path):
+    from agent_loop.session_log import SessionLog
+
+    png = tmp_path / "a.png"
+    png.write_bytes(_min_png())
+    log_path = tmp_path / "session.jsonl"
+    runtime = ToolRuntime()
+    runtime.workspace = str(tmp_path)
+    runtime.session_dir = str(tmp_path / "sess")
+    runtime.attach_log(SessionLog(log_path))
+    result = asyncio.run(
+        runtime.call_tool(
+            {
+                "id": "c1",
+                "function": {"name": "read", "arguments": '{"path": "a.png"}'},
+            }
+        )
+    )
+    assert result.media["kind"] == "image"
+    assert "base64" not in result.content
+    rows = SessionLog(log_path).read_all()
+    attached = [r for r in rows if r.get("type") == "image_attached"]
+    assert len(attached) == 1
+    assert attached[0]["kind"] == "record"
+    assert attached[0]["name"].endswith(".png")
+    assert "base64" not in json.dumps(attached[0])
+
+
+def test_entries_to_messages_attaches_image_on_user_not_tool(tmp_path):
+    from agent_loop.recover import entries_to_messages
+    from agent_loop.tools.read_tool import IMAGE_OMIT_NOTE, encode_image_data_url
+
+    png = tmp_path / "a.png"
+    png.write_bytes(_min_png())
+    row = {
+        "kind": "entry",
+        "type": "tool_result",
+        "seq": 1,
+        "tool_call_id": "call1",
+        "tool_name": "read",
+        "content": "Read image file [image/png]\nsaved: x",
+        "media": {"kind": "image", "mime": "image/png", "path": str(png)},
+    }
+    with_img = entries_to_messages([row], supports_images=True)
+    assert with_img[0]["role"] == "tool"
+    assert with_img[0]["content"].startswith("Read image file")
+    assert with_img[1]["role"] == "user"
+    blocks = with_img[1]["content"]
+    assert blocks[0]["type"] == "text"
+    assert blocks[1]["type"] == "image_url"
+    url = blocks[1]["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")
+    assert encode_image_data_url(str(png), "image/png") == url
+
+    no_img = entries_to_messages([row], supports_images=False)
+    assert len(no_img) == 1
+    assert no_img[0]["role"] == "tool"
+    assert IMAGE_OMIT_NOTE in no_img[0]["content"]
+    assert "base64" not in no_img[0]["content"]

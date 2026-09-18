@@ -132,6 +132,7 @@ def _reproject(
     log: SessionLog,
     tracker: ContextUsageTracker,
     system_content: Optional[str] = None,
+    llm=None,
 ) -> None:
     """压缩落盘后重新投影。
 
@@ -147,7 +148,10 @@ def _reproject(
                 leading.append(msg)
             else:
                 break
-    messages[:] = leading + entries_to_messages(log.read_all())
+    messages[:] = leading + entries_to_messages(
+        log.read_all(),
+        supports_images=getattr(llm, "supports_images", False),
+    )
     tracker.bootstrap(messages)
 
 
@@ -189,7 +193,7 @@ async def maybe_compact(
 
     cleared = run_microcompact(log, log.read_all(), tracker.context_window)
     if cleared > 0:
-        _reproject(messages, log, tracker, system_content=system_content)
+        _reproject(messages, log, tracker, system_content=system_content, llm=llm)
         changed = True
         log_compaction("microcompact", ratio, tracker.usage_ratio())
         logging.info(
@@ -209,7 +213,7 @@ async def maybe_compact(
         log, log.read_all(), llm, tracker.context_window, abort=abort
     )
     if summarized:
-        _reproject(messages, log, tracker, system_content=system_content)
+        _reproject(messages, log, tracker, system_content=system_content, llm=llm)
         changed = True
         log_compaction("summary", before_summary, tracker.usage_ratio())
         logging.info(

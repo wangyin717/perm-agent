@@ -26,6 +26,7 @@ from agent_loop.recover import (
     entries_to_messages,
     inspect_log,
     should_append_user,
+    tool_result_api_messages,
     unfinished_assistant_id,
 )
 from agent_loop.session_log import SessionLog, session_log_path
@@ -33,6 +34,7 @@ from agent_loop.runtime.tool_concurrency import run_tool_calls, terminate_cutoff
 from agent_loop.runtime.tool_runtime import ToolRuntime
 from agent_loop.runtime.records import new_result_id
 from agent_loop.cli.trace import log_context, log_llm_text, log_llm_tools, log_user
+from agent_loop.session_title import ensure_auto_title
 from agent_loop.events import emit as emit_event
 from agent_loop.deps import ExecutionDependencies
 from agent_loop.prompt import build_system_prompt
@@ -106,6 +108,16 @@ class ReactAgentLoop(AgentLoop):
             self._llm = DeepSeekLLM()
         return self._llm
 
+    def _seed_title(self, user_action_data: Dict[str, Any], hint: str = "") -> None:
+        workspace = str(user_action_data.get("workspace") or os.getcwd())
+        session_id = str(user_action_data.get("sessionId") or "default")
+        ensure_auto_title(
+            workspace,
+            session_id,
+            hint,
+            user_action_data.get("sparkHome"),
+        )
+
     async def _run_loop(self, user_query: str, user_action_data: Dict[str, Any]) -> str:
         self._log = SessionLog(session_log_path(user_action_data))
         self.runtime.attach_log(self._log)
@@ -135,9 +147,14 @@ class ReactAgentLoop(AgentLoop):
         # 所以这里拿到的已经是"压缩后应该发给模型"的样子，不是原始全量历史。
         workspace = user_action_data.get("workspace") or os.getcwd()
         system = build_system_prompt(workspace)
-        messages = [{"role": "system", "content": system}]
-        messages.extend(entries_to_messages(self._log.read_all()))
         llm = self._get_llm()
+        messages = [{"role": "system", "content": system}]
+        messages.extend(
+            entries_to_messages(
+                self._log.read_all(),
+                supports_images=getattr(llm, "supports_images", False),
+            )
+        )
         tracker = ContextUsageTracker(context_window=getattr(llm, "context_window", 0) or 0)
         # bootstrap 是本地估算，不发请求；第一次真实 llm.call 拿到 usage 后会被校准掉。
         tracker.bootstrap(messages)
@@ -158,6 +175,7 @@ class ReactAgentLoop(AgentLoop):
             result = await self._run_outer_inner(
                 messages, llm, abort, tracker, system_content=system
             )
+            self._seed_title(user_action_data, user_query)
             if not abort.aborted:
                 await maybe_flush(
                     self._log,
@@ -239,7 +257,13 @@ class ReactAgentLoop(AgentLoop):
                 if response.tool_calls:
                     empty_retries = 0
                     log_llm_tools(response.tool_calls)
-                    await self._handle_tool_calls(messages, response, assistant_id, tracker)
+                    await self._handle_tool_calls(
+                        messages,
+                        response,
+                        assistant_id,
+                        tracker,
+                        supports_images=getattr(llm, "supports_images", False),
+                    )
                     has_more_tools = True
                     continue
                 text = response.text or ""
@@ -314,6 +338,7 @@ class ReactAgentLoop(AgentLoop):
         response,
         assistant_id: str,
         tracker: ContextUsageTracker,
+        supports_images: bool = False,
     ) -> None:
         """把 assistant 的 tool_calls 跑完，结果追加进 messages。
 
@@ -343,9 +368,23 @@ class ReactAgentLoop(AgentLoop):
         if not assistant_msg["tool_calls"]:
             assistant_msg.pop("tool_calls", None)
         for result in results[:cut]:
-            result_msg = result.to_message()
-            messages.append(result_msg)
-            tracker.add_estimate(result_msg)
+            row = {
+                "tool_call_id": result.tool_call_id,
+                "tool_name": result.tool_name,
+                "content": result.content,
+                "media": result.media,
+                "result_id": result.result_id,
+            }
+            api_msgs = tool_result_api_messages(
+                row,
+                result.content,
+                supports_images=supports_images,
+                attach_media=True,
+            )
+            for msg in api_msgs:
+                messages.append(msg)
+                if msg.get("role") == "tool":
+                    tracker.add_estimate(msg)
 
 
 def _listen_sigint(abort: Abort):

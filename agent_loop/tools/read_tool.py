@@ -1,11 +1,16 @@
-"""读文本文件；pdf/docx/xlsx 抽成文本。短的内联，长的落盘再 grep。"""
+"""读文本文件；pdf/docx/xlsx 抽成文本。短的内联，长的落盘再 grep。
+
+图片（jpeg/png/gif/webp）按文件头识别，jsonl 只记路径；发给模型时再编码。
+"""
 
 from __future__ import annotations
 
 import hashlib
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
+
+from agent_loop.runtime.records import ToolOutput
 
 NAME = "read"
 REPLAY = "safe"
@@ -17,6 +22,10 @@ MAX_BYTES = 100_000
 SPILL_CHARS = 8000
 PREVIEW_LINES = 30
 PREVIEW_CHARS = 2000
+MAX_IMAGE_BYTES = 32 * 1024 * 1024
+IMAGE_OMIT_NOTE = (
+    "[Current model does not support images. The image will be omitted from this request.]"
+)
 
 
 def resolve_path(path: str, workspace: str) -> Path:
@@ -47,7 +56,9 @@ BEFORE_HOOKS = [before_tool_deny_empty_path]
 AFTER_HOOKS: list = []
 
 
-async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_dir=None) -> str:
+async def execute(
+    args: Dict[str, Any], sandbox=None, workspace=None, session_dir=None
+) -> Union[str, ToolOutput]:
     path = (args.get("path") or "").strip()
     if not path:
         raise ValueError("path 为空")
@@ -59,6 +70,18 @@ async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_di
         raise FileNotFoundError(f"file not found: {path}")
     if file_path.is_dir():
         raise IsADirectoryError(f"is a directory: {path}")
+    data = file_path.read_bytes()
+    sniffed = sniff_image(data)
+    if sniffed is not None:
+        mime, ext = sniffed
+        return _read_image(
+            file_path,
+            data,
+            mime=mime,
+            ext=ext,
+            workspace=root,
+            session_dir=session_dir,
+        )
     extractor = EXTRACTORS.get(file_path.suffix.lower())
     if extractor is not None:
         return _read_extracted(
@@ -69,7 +92,7 @@ async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_di
             offset=offset,
             limit=limit,
         )
-    return _read_text(file_path, offset=offset, limit=limit)
+    return _read_text_bytes(file_path, data, offset=offset, limit=limit)
 
 
 def _read_extracted(
@@ -206,8 +229,62 @@ def _paginate(text: str, offset=None, limit=None) -> str:
     return body + footer
 
 
-def _read_text(file_path: Path, offset=None, limit=None) -> str:
-    data = file_path.read_bytes()
+def sniff_image(data: bytes) -> Optional[tuple]:
+    """用文件头认 jpeg/png/gif/webp。不看扩展名。"""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", ".jpg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif", ".gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+    return None
+
+
+def encode_image_data_url(path: str, mime: str) -> Optional[str]:
+    import base64
+
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return None
+    if not raw or len(raw) > MAX_IMAGE_BYTES:
+        return None
+    if sniff_image(raw) is None:
+        return None
+    b64 = base64.b64encode(raw).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+def _read_image(
+    file_path: Path,
+    data: bytes,
+    *,
+    mime: str,
+    ext: str,
+    workspace: str,
+    session_dir: Optional[str],
+) -> ToolOutput:
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ValueError(
+            f"image too large ({len(data)} bytes, max {MAX_IMAGE_BYTES}): {file_path.name}"
+        )
+    saved = str(file_path.resolve())
+    if session_dir:
+        key = hashlib.sha256(str(file_path.resolve()).encode("utf-8")).hexdigest()[:12]
+        dest = Path(session_dir) / "workspace" / "tools_result" / "read" / f"{key}{ext}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        saved = str(dest.resolve())
+    content = f"Read image file [{mime}]\nsaved: {saved}"
+    return ToolOutput(
+        content=content,
+        media={"kind": "image", "mime": mime, "path": saved},
+    )
+
+
+def _read_text_bytes(file_path: Path, data: bytes, offset=None, limit=None) -> str:
     if b"\x00" in data[:8000]:
         raise ValueError(f"binary file cannot be read as text: {file_path.name}")
     text = data.decode("utf-8", errors="replace")

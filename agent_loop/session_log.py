@@ -1,4 +1,4 @@
-"""会话日志：~/.spark-agent/projects/{slug}-{hash}/chats/<id>/session.jsonl
+"""会话日志：~/.permanent/projects/{slug}-{hash}/chats/<id>/session.jsonl
 
 一行一次写入。两种 kind：
   record — 执行意图（tool_started），不进模型上下文

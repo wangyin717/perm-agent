@@ -5,7 +5,7 @@
 
 加工具：写 `execute` + `REPLAY` + `READ_ONLY` + 自己的 hooks，登记进 `TOOLS`，不必改循环。增删工具只改 registry + schema；人设里的工具注意事项按启用工具再拼，不要在 yaml 里抄参数表。
 
-密钥：仓库根 `.env`（`DEEPSEEK_API_KEY`、`PERPLEXITY_API_KEY`，Jev 用 `TYPESAFE_API_KEY`），启动时 `envfile.load_dotenv()` 读入；已有环境变量不覆盖。`.env` 不进 git，`.env.example` 只有变量名。Jev 三处见 `docs/jev.md`。
+密钥：仓库根 `.env`（`DEEPSEEK_API_KEY`、`PERPLEXITY_API_KEY`，Jev 用 `TYPESAFE_API_KEY`），启动时 `envfile.load_dotenv()` 读入；已有环境变量不覆盖。`.env` 不进 git，`.env.example` 只有变量名。Jev 三处见 `docs/jev.md`。开发入口：`uv sync && uv run perm`。
 
 跨会话 memory 见 §4。
 
@@ -144,14 +144,14 @@ end_turn 之后才进的 steer 当成**新回合**：先按 60% 做压缩，再�
 
 ## 4. 家目录（会话 + 记忆）
 
-不写进用户仓库。`SPARK_AGENT_HOME` 可改根，默认 `~/.spark-agent`（创建时尽量 `chmod 700`）。`{slug}-{hash}` 见 `paths.py`：目录名 + 仓库绝对路径 sha256 前 8 位。同一路径稳定，不进 git。
+不写进用户仓库。`PERMANENT_HOME` 可改根，默认 `~/.permanent`（创建时尽量 `chmod 700`）。`{slug}-{hash}` 见 `paths.py`：目录名 + 仓库绝对路径 sha256 前 8 位。同一路径稳定，不进 git。
 
 jsonl 不是 memory。压缩摘要也不是 memory。`AGENTS.md` 是人写的项目说明书，开场已经拼进 system，不要再叫 memory。
 
 ```text
-~/.spark-agent/MEMORY.md                      全局长期
+~/.permanent/MEMORY.md                      全局长期
 
-~/.spark-agent/projects/{slug}-{hash}/
+~/.permanent/projects/{slug}-{hash}/
   memory/MEMORY.md                            项目长期（Dream 覆盖）
   memory/YYYY-MM-DD-slug-{sessionId}.md       Flush 中期
   memory/activity.jsonl
@@ -172,7 +172,7 @@ fetch / 长文档 / 长 bash 的 `saved:` 多为家目录绝对路径（相对 w
 | 短期 | 本轮对话 | `chats/{sessionId}/session.jsonl` | loop | 本 session 投影 |
 | 中期 | 这一次聊里可复用的事实 | `memory/YYYY-MM-DD-slug-{sessionId}.md` | Flush | Dream、`memory_search` |
 | 长期（项目） | 这个仓库仍然成立的约定 | `memory/MEMORY.md` | Dream（整份覆盖） | `memory_search` / `memory_get` |
-| 长期（全局） | 跨项目的人的偏好 | `~/.spark-agent/MEMORY.md` | 人改或工具写；v1 Dream 不自动改 | 同上 |
+| 长期（全局） | 跨项目的人的偏好 | `~/.permanent/MEMORY.md` | 人改或工具写；v1 Dream 不自动改 | 同上 |
 
 短期跟**这一次聊天**走，在 `{sessionId}/` 里。  
 中期和项目长期跟**这个仓库**走，和所有 `{sessionId}` 平级，都在 `memory/`。  
@@ -211,7 +211,7 @@ Flush 和压缩摘要必须两套提示词、两处落盘，不能共用。
 
 提示词要点：相关的合成一个主题；新事实推翻旧的；「昨天」改成绝对日期；丢掉问候、工具噪音、Current state、Next steps、已在全局里的偏好；留下决定、架构、问题/修法；没什么可留就 `NO_REPLY`，长期文件不动。
 
-全局 `~/.spark-agent/MEMORY.md`：v1 靠人改或以后的 memory 工具写。不要每闲一次用同一堆中期再 dream 一遍全局。
+全局 `~/.permanent/MEMORY.md`：v1 靠人改或以后的 memory 工具写。不要每闲一次用同一堆中期再 dream 一遍全局。
 
 **何时跑：** 不是系统守护进程。CLI 跑完就退出，v1 在进程 `return` 前过门再试一次。门：距上次成功 Dream 够小时数；上次之后新中期文件够份数；文件锁。关会话不跑 Dream。以后有常驻 TUI，再加循环里的定时器。
 
@@ -441,7 +441,7 @@ read 分页是「全文进内存再切一页给模型」。默认也可能只返
 
 ## 13. TUI
 
-`cli/tui.py` 订 `events`，不改 jsonl。`python -m agent_loop` 开 TUI；`-s <id> "<问题>"` 仍是一次性 CLI。须用项目 `.venv`。界面名叫 Permanent。空会话居中一张浅框：左边永恒号（环状模块舱），右边 `/new` `/resume` `/help`。`/new` 开空白会话；`/resume` 列出本项目会话（每页 10 条，点行或 ↑↓ 加回车进入，←→ 翻页），也可用 `/resume 1` 或 `/resume <id>`。标题在 `chats/{id}/title.json`（目录名仍是 id）：首条用户话自动写入，`/rename` 记 `title_is_manual`。粘贴/拖入绝对图片路径或剪贴板位图变成 `[Image #N]`，文件落在 `chats/{id}/input/images/`；user entry 记 `media.path`，投影时挂在这条 user 上。散文里的路径不当图。时间线滚动立刻跳（关掉 Textual 默认惯性动画），滚轮一次 4 行。
+`cli/tui.py` 订 `events`，不改 jsonl。`uv run perm` 开 TUI；`-s <id> "<问题>"` 仍是一次性 CLI。须用项目 `.venv`。界面名叫 Permanent。空会话居中一张浅框：左边永恒号（环状模块舱），右边 `/new` `/resume` `/help`。`/new` 开空白会话；`/resume` 列出本项目会话（每页 10 条，点行或 ↑↓ 加回车进入，←→ 翻页），也可用 `/resume 1` 或 `/resume <id>`。标题在 `chats/{id}/title.json`（目录名仍是 id）：首条用户话自动写入，`/rename` 记 `title_is_manual`。粘贴/拖入绝对图片路径或剪贴板位图变成 `[Image #N]`，文件落在 `chats/{id}/input/images/`；user entry 记 `media.path`，投影时挂在这条 user 上。散文里的路径不当图。时间线滚动立刻跳（关掉 Textual 默认惯性动画），滚轮一次 4 行。
 
 过程行：灰色菱形 + 加粗动词。流式思维链在时间线实时走 `Thinking… Xs`，该段结束落下 `Thought for Xs`。回合结束只在时间线落一行：
 
@@ -482,7 +482,7 @@ read 分页是「全文进内存再切一页给模型」。默认也可能只返
 prompt/assemble.py      拼 system（yaml + tool_notes + AGENTS.md + cwd + 日期）
 prompt/system_prompt.yaml  人设 + 按工具启用的注意事项
 loop.py                 两层循环 + 压缩检查点
-paths.py                ~/.spark-agent 布局
+paths.py                ~/.permanent 布局
 memory/                 Flush / Dream / 召回
 inbox.py / abort.py / compaction.py / recover.py / session_log.py / envfile.py
 runtime/                工单、并行、hook、先读再改快照（Jev 客户端以后放这里）
@@ -496,4 +496,4 @@ events.py               内核 → 界面
 docs/harness.md         本文（含跨会话 memory）
 ```
 
-独立入口：`python -m agent_loop` 打开 TUI；`python -m agent_loop -s <id> "<问题>"` 仍是一次性 CLI。
+独立入口：`uv run perm` 打开 TUI；`uv run perm -s <id> "<问题>"` 仍是一次性 CLI。

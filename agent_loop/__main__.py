@@ -1,4 +1,4 @@
-"""python -m agent_loop → CLI。"""
+"""python -m agent_loop 或 uv run perm → CLI。"""
 
 from agent_loop.cli.app import main
 

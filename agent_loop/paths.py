@@ -1,7 +1,7 @@
-"""家目录布局：会话、快照、记忆都在 ~/.spark-agent，不写进用户仓库。
+"""家目录布局：会话、快照、记忆都在 ~/.permanent，不写进用户仓库。
 
-~/.spark-agent/MEMORY.md
-~/.spark-agent/projects/{slug}-{hash}/
+~/.permanent/MEMORY.md
+~/.permanent/projects/{slug}-{hash}/
   memory/MEMORY.md
   memory/YYYY-MM-DD-slug-{sessionId}.md
   chats/{sessionId}/session.jsonl
@@ -24,10 +24,10 @@ PathLike = Union[str, Path]
 def spark_home(override: Optional[PathLike] = None) -> Path:
     if override:
         return Path(override).expanduser().resolve()
-    env = (os.environ.get("SPARK_AGENT_HOME") or "").strip()
+    env = (os.environ.get("PERMANENT_HOME") or "").strip()
     if env:
         return Path(env).expanduser().resolve()
-    return Path.home() / ".spark-agent"
+    return Path.home() / ".permanent"
 
 
 def _slug(name: str) -> str:

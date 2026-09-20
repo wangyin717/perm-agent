@@ -144,7 +144,7 @@ def test_splash_on_empty_hides_when_turn_starts(tmp_path, monkeypatch):
     from agent_loop.cli.tui import ENDURANCE_ART, SplashCard
 
     home = tmp_path / "home"
-    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
     ws = tmp_path / "ws"
     ws.mkdir()
 
@@ -177,7 +177,7 @@ def test_slash_menu_filters_and_tab_completes(tmp_path, monkeypatch):
     from agent_loop.cli.tui import SlashMenu, SlashRow
 
     home = tmp_path / "home"
-    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
     ws = tmp_path / "ws"
     ws.mkdir()
 
@@ -223,7 +223,7 @@ def test_resume_lists_and_replays_history(tmp_path, monkeypatch):
     from agent_loop.paths import session_log_path_for
 
     home = tmp_path / "home"
-    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
     ws = tmp_path / "ws"
     ws.mkdir()
     log = session_log_path_for(ws, "cli-old", home=home)
@@ -259,7 +259,7 @@ def test_resume_escape_restores_session(tmp_path, monkeypatch):
     from agent_loop.paths import session_log_path_for
 
     home = tmp_path / "home"
-    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
     ws = tmp_path / "ws"
     ws.mkdir()
     log = session_log_path_for(ws, "stay-here", home=home)
@@ -296,7 +296,7 @@ def test_resume_keyboard_opens_selected(tmp_path, monkeypatch):
     from agent_loop.paths import session_log_path_for
 
     home = tmp_path / "home"
-    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
     ws = tmp_path / "ws"
     ws.mkdir()
     for i, sid in enumerate(("first-a", "second-b")):
@@ -335,7 +335,7 @@ def test_resume_pages_and_click(tmp_path, monkeypatch):
     from agent_loop.paths import session_log_path_for
 
     home = tmp_path / "home"
-    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
     ws = tmp_path / "ws"
     ws.mkdir()
     for i in range(12):

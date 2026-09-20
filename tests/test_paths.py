@@ -28,7 +28,7 @@ def test_session_log_path_layout(tmp_path):
 
 def test_list_sessions_newest_first(tmp_path, monkeypatch):
     home = tmp_path / "home"
-    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
     ws = tmp_path / "ws"
     ws.mkdir()
     older = session_log_path_for(ws, "old-a", home=home)
@@ -64,7 +64,7 @@ def test_session_title_sidecar(tmp_path, monkeypatch):
     )
 
     home = tmp_path / "home"
-    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
     ws = tmp_path / "ws"
     ws.mkdir()
     log = session_log_path_for(ws, "s1", home=home)
@@ -96,7 +96,7 @@ def test_auto_title_strips_leading_url(tmp_path, monkeypatch):
     from agent_loop.session_title import clip_title, ensure_auto_title, read_title, write_title
 
     home = tmp_path / "home"
-    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
     ws = tmp_path / "ws"
     ws.mkdir()
     sid = "url-s"

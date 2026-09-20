@@ -1,4 +1,4 @@
-"""本地 CLI：python -m agent_loop --session wy1 "随便写一段 python 并运行一下" """
+"""本地 CLI：uv run perm --session wy1 "随便写一段 python 并运行一下" """
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ async def _amain(query: str, session_id: str) -> str:
 
 def main() -> None:
     load_dotenv()
-    parser = argparse.ArgumentParser(description="独立 agent loop")
+    parser = argparse.ArgumentParser(description="Permanent")
     parser.add_argument(
         "-s",
         "--session",

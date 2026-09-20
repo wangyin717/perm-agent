@@ -6,15 +6,17 @@ SwiftAgent 仓库里的代码没有改。这里只换了包名，并加了一个
 
 ## 跑起来
 
-入口：`python -m agent_loop`（`agent_loop/cli/app.py`）。细节见 `docs/harness.md`。
+产品名 Permanent。开发入口：`uv run perm`（`agent_loop/cli/app.py`）。细节见 `docs/harness.md`。
 
 ```bash
 cd /Users/wangyin/agent_loop
-source .venv/bin/activate
-PYTHONPATH=. python -m agent_loop -s wy1 "随便写一段 python 并运行一下"
+uv sync
+uv run perm
 ```
 
-`-s / --session` 指定会话，日志在 `~/.spark-agent/projects/<项目>-<hash>/chats/<id>/session.jsonl`。不传则每次新建 `cli-时间戳`。可用 `SPARK_AGENT_HOME` 改家目录。
+`uv run perm -s wy1 "随便写一段 python 并运行一下"` 是一次性 CLI。不传 query 开 TUI。不要设 `PYTHONPATH`。
+
+会话日志在 `~/.permanent/projects/<项目>-<hash>/chats/<id>/session.jsonl`。可用 `PERMANENT_HOME` 改家目录。把 `perm` 装到任意目录都能敲，是下一步安装器的事。
 
 终端过程按对话分段打印：
 
@@ -41,4 +43,4 @@ PYTHONPATH=. python -m agent_loop -s wy1 "随便写一段 python 并运行一下
 
 ## 布局
 
-和原来 `swiftagent/agent_loop` 相同。入口是 `python -m agent_loop`，内部调 `_run_loop`，不经过 SA 的 Post/SSE。
+和原来 `swiftagent/agent_loop` 相同。入口是 `uv run perm`，内部调 `_run_loop`，不经过 SA 的 Post/SSE。

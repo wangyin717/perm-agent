@@ -156,10 +156,12 @@ def _clip_arg(text: str, limit: int = _ARG_MAX) -> str:
 
 
 # GrokDay：正文 #262626，次要 #444444，弱化 #767676，链接 #2F64D2
+# 页底和输入框同一浅灰，不要输入框单独一块白。
 _BLUE = "#2F64D2"
 _TEXT = "#262626"
 _SECONDARY = "#444444"
 _MUTED = "#767676"
+_PAGE = "#f5f5f5"
 _PROSE_THEME = Theme(
     {
         "markdown.h1": Style(bold=True, color=_TEXT),
@@ -415,7 +417,7 @@ class SessionPickRow(Static):
         margin: 0;
         padding: 0 2;
         color: #444444;
-        background: #eeeeee;
+        background: #f5f5f5;
     }
     SessionPickRow:hover {
         background: #e8e8ea;
@@ -445,7 +447,7 @@ class ResumePageRow(Static):
         margin: 0;
         padding: 0 2;
         color: #767676;
-        background: #eeeeee;
+        background: #f5f5f5;
     }
     ResumePageRow:hover {
         background: #e8e8ea;
@@ -613,7 +615,7 @@ class Prose(Static):
         height: auto;
         width: 1fr;
         margin: 1 3 1 3;
-        background: #eeeeee;
+        background: #f5f5f5;
         color: #262626;
     }
     """
@@ -1016,7 +1018,7 @@ class SplashCard(Horizontal):
         height: auto;
         padding: 2 3;
         border: round #d5d5d8;
-        background: #f3f3f4;
+        background: #f5f5f5;
         layout: horizontal;
         align: left middle;
     }
@@ -1045,18 +1047,18 @@ class SparkTui(App):
     CSS = """
     Screen {
         layout: vertical;
-        background: #eeeeee;
+        background: #f5f5f5;
         color: #262626;
     }
     #chrome {
         height: 1;
         padding: 0 1;
         color: #767676;
-        background: #eaeaea;
+        background: #f5f5f5;
     }
     #timeline {
         height: 1fr;
-        background: #eeeeee;
+        background: #f5f5f5;
         overflow-x: hidden;
         overflow-y: scroll;
     }
@@ -1094,7 +1096,7 @@ class SparkTui(App):
         height: auto;
         margin: 1 3;
         padding: 0;
-        background: #eeeeee;
+        background: #f5f5f5;
     }
     #timeline DiffBlock {
         width: 100%;
@@ -1112,7 +1114,7 @@ class SparkTui(App):
         height: 3;
         margin: 0 1;
         padding: 0 1;
-        background: #ffffff;
+        background: #f5f5f5;
         border: round #c7c7cc;
         align: left middle;
     }
@@ -1128,7 +1130,7 @@ class SparkTui(App):
     #prompt {
         width: 1fr;
         height: 1;
-        background: #ffffff;
+        background: #f5f5f5;
         border: none;
         padding: 0 1 0 0;
     }

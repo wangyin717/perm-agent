@@ -167,7 +167,7 @@ def test_tui_paste_absolute_png_inserts_chip(tmp_path, monkeypatch):
     from agent_loop.cli.tui import SparkTui
 
     home = tmp_path / "home"
-    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
     ws = tmp_path / "ws"
     ws.mkdir()
     png = tmp_path / "shot.png"
@@ -204,7 +204,7 @@ def test_tui_typed_quoted_path_becomes_chip(tmp_path, monkeypatch):
     from agent_loop.cli.tui import SparkTui
 
     home = tmp_path / "home"
-    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
     ws = tmp_path / "ws"
     ws.mkdir()
     png = tmp_path / "截屏2026-09-18 17.17.35.png"
@@ -228,7 +228,7 @@ def test_tui_backspace_deletes_whole_chip(tmp_path, monkeypatch):
     from agent_loop.cli.tui import SparkTui
 
     home = tmp_path / "home"
-    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
     ws = tmp_path / "ws"
     ws.mkdir()
     png = tmp_path / "shot.png"

@@ -6,12 +6,14 @@ import argparse
 import asyncio
 import logging
 import os
+import sys
 from datetime import datetime
 
 from agent_loop.loop import ReactAgentLoop
 from agent_loop.envfile import load_dotenv
 from agent_loop.paths import session_log_path_for
 from agent_loop.cli.trace import log_session
+from agent_loop.update import peek_update, run_update
 
 
 class CliDeps:
@@ -30,8 +32,24 @@ async def _amain(query: str, session_id: str) -> str:
     return await loop._run_loop(query, user_action_data)
 
 
+def _run_update_cli(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="perm update", description="Update a managed Permanent install")
+    parser.add_argument(
+        "--version",
+        "--ref",
+        dest="ref",
+        default=None,
+        help="tag to install (default: newest vX.Y.Z)",
+    )
+    args = parser.parse_args(argv)
+    return run_update(ref=args.ref)
+
+
 def main() -> None:
     load_dotenv()
+    rest = sys.argv[1:]
+    if rest and rest[0] == "update" and (len(rest) == 1 or rest[1].startswith("-")):
+        raise SystemExit(_run_update_cli(rest[1:]))
     parser = argparse.ArgumentParser(description="Permanent")
     parser.add_argument(
         "-s",
@@ -58,6 +76,9 @@ def main() -> None:
 
         run_tui(args.session)
         return
+    notice = peek_update()
+    if notice:
+        print(notice, file=sys.stderr)
     asyncio.run(_amain(query, session_id))
 
 

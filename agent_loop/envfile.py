@@ -23,9 +23,12 @@ def load_dotenv() -> None:
 
 
 def _candidate_paths():
+    from agent_loop.paths import spark_home
+
     yield Path.cwd() / ".env"
     # agent_loop/envfile.py → 仓库根
     yield Path(__file__).resolve().parent.parent / ".env"
+    yield spark_home() / ".env"
 
 
 def _apply(path: Path) -> None:

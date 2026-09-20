@@ -1205,6 +1205,22 @@ class SparkTui(App):
         self._replay_log(path)
         self._maybe_show_splash()
         self.query_one("#prompt", Input).focus()
+        self.run_worker(
+            self._peek_update_worker,
+            exclusive=True,
+            group="update",
+            thread=True,
+        )
+
+    def _peek_update_worker(self) -> None:
+        from agent_loop.update import peek_update
+
+        notice = peek_update()
+        if notice:
+            self.call_from_thread(self._show_update_notice, notice)
+
+    def _show_update_notice(self, notice: str) -> None:
+        self._timeline().mount(TimelineRow(_mark(notice), classes="muted"))
 
     def on_unmount(self) -> None:
         events.print_to_stdout = True

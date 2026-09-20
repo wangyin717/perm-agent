@@ -14,9 +14,17 @@ uv sync
 uv run perm
 ```
 
+任意机器安装（钉最新 `vX.Y.Z` tag；没有 tag 时加 `--ref main`）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wangyin717/spark-agent/main/install.sh | bash
+perm
+perm update
+```
+
 `uv run perm -s wy1 "随便写一段 python 并运行一下"` 是一次性 CLI。不传 query 开 TUI。不要设 `PYTHONPATH`。
 
-会话日志在 `~/.permanent/projects/<项目>-<hash>/chats/<id>/session.jsonl`。可用 `PERMANENT_HOME` 改家目录。把 `perm` 装到任意目录都能敲，是下一步安装器的事。
+会话日志在 `~/.permanent/projects/<项目>-<hash>/chats/<id>/session.jsonl`。可用 `PERMANENT_HOME` 改家目录。安装器把命令写到 `~/.local/bin/perm`，代码和 venv 在 `~/.permanent/src`。开发树里的 `uv run perm` 不查远程 tag；装好的 `perm` 启动时若有新 tag 会提示 `perm update`。
 
 终端过程按对话分段打印：
 

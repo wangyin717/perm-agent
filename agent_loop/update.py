@@ -15,7 +15,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 
 from agent_loop.paths import spark_home
 
-REPO_URL = "https://github.com/wangyin717/spark-agent.git"
+REPO_URL = "https://github.com/wangyin717/perm-agent.git"
 _TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 _PEEL = "^{}"
 

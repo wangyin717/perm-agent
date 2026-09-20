@@ -1,11 +1,11 @@
 #!/bin/bash
 # Permanent installer. Usage:
-#   curl -fsSL https://raw.githubusercontent.com/wangyin717/spark-agent/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/wangyin717/perm-agent/main/install.sh | bash
 #   curl … | bash -s -- --ref v0.1.0
 #   curl … | bash -s -- --non-interactive
 set -euo pipefail
 
-REPO_URL="${PERMANENT_REPO:-https://github.com/wangyin717/spark-agent.git}"
+REPO_URL="${PERMANENT_REPO:-https://github.com/wangyin717/perm-agent.git}"
 PERMANENT_HOME="${PERMANENT_HOME:-$HOME/.permanent}"
 SRC="$PERMANENT_HOME/src"
 UV_DIR="$PERMANENT_HOME/bin"

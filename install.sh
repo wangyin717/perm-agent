@@ -136,22 +136,22 @@ EOF
   ok "command $LINK_DIR/perm"
 }
 
-ensure_path() {
-  case ":$PATH:" in
-    *":$LINK_DIR:"*) return 0 ;;
-  esac
-  local rc=""
-  if [ -n "${ZSH_VERSION:-}" ] || [ "$(basename "${SHELL:-}")" = zsh ]; then
-    rc="$HOME/.zshrc"
-  else
-    rc="$HOME/.bashrc"
-  fi
+_append_path_rc() {
+  local rc="$1"
   local marker="# permanent-cli"
   if [ -f "$rc" ] && grep -q "$marker" "$rc" 2>/dev/null; then
     return 0
   fi
   printf '\n%s\nexport PATH="%s:$PATH"\n' "$marker" "$LINK_DIR" >>"$rc"
-  ok "added $LINK_DIR to PATH in $rc (open a new terminal)"
+}
+
+ensure_path() {
+  _append_path_rc "$HOME/.bashrc"
+  _append_path_rc "$HOME/.profile"
+  case ":$PATH:" in
+    *":$LINK_DIR:"*) return 0 ;;
+  esac
+  ok "added $LINK_DIR to PATH in ~/.bashrc and ~/.profile"
 }
 
 prompt_key() {
@@ -205,5 +205,8 @@ log "uv sync"
 write_wrapper
 ensure_path
 prompt_key
-printf '\n✓ done. run: perm\n'
-printf '  update later: perm update\n\n'
+printf '\n✓ done. this shell does not pick up PATH yet; run:\n'
+printf '  export PATH="%s:$PATH"\n' "$LINK_DIR"
+printf '  perm\n'
+printf '  (or: source ~/.bashrc)\n'
+printf '  later: perm update\n\n'

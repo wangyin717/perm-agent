@@ -5,7 +5,7 @@ import asyncio
 import logging
 import time
 
-from agent_loop.cli.tui import SparkTui, TimelineRow, matching_slash, slash_prefix
+from agent_loop.cli.tui import PromptInput, SparkTui, TimelineRow, matching_slash, slash_prefix
 
 
 def _status(app: SparkTui) -> str:
@@ -59,6 +59,16 @@ async def _run() -> None:
         await pilot.pause()
         assert len(_thoughts(app)) == 1
         assert "Thought" in _thoughts(app)[0]
+
+
+def test_markdown_body_uses_grokday_md_text():
+    from agent_loop.cli import tui as tui_mod
+
+    tui_mod._MD_CACHE.clear()
+    text = tui_mod._markdown_as_text("hello world", 40)
+    styles = " ".join(str(span.style) for span in text.spans)
+    assert "#444444" in styles
+    assert "hello world" in text.plain
 
 
 def test_markdown_as_text_cache_returns_copy():
@@ -136,6 +146,25 @@ def test_prompt_wraps_chevron():
             assert mark.parent is wrap
             assert "›" in str(mark.content)
             await pilot.pause()
+
+    asyncio.run(_run())
+
+
+def test_prompt_cursor_does_not_blink():
+    async def _run() -> None:
+        app = SparkTui("cursor-blink", "/tmp/spark-agent-tui-cursor")
+        async with app.run_test(size=(80, 24)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            await pilot.pause()
+            assert prompt.cursor_blink is False
+            assert prompt._cursor_visible is True
+            prompt.value = "你好"
+            await pilot.pause()
+            assert prompt.cursor_blink is False
+            assert prompt._cursor_visible is True
+            prompt._restart_blink()
+            assert prompt.cursor_blink is False
+            assert prompt._cursor_visible is True
 
     asyncio.run(_run())
 

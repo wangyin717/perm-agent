@@ -155,7 +155,7 @@ def _clip_arg(text: str, limit: int = _ARG_MAX) -> str:
     return text[: max(limit - 1, 1)] + "…"
 
 
-# GrokDay：正文 #262626，次要 #444444，弱化 #767676，链接 #2F64D2
+# GrokDay：正文 md_text #444444，标题/强调 #262626，弱化 #767676，链接 #2F64D2
 # 页底和输入框同一浅灰，不要输入框单独一块白。
 _BLUE = "#2F64D2"
 _TEXT = "#262626"
@@ -175,8 +175,10 @@ _PROSE_THEME = Theme(
         "markdown.code_block": Style(color=_BLUE),
         "markdown.link": Style(color=_BLUE, underline=True),
         "markdown.link_url": Style(color=_BLUE, underline=True),
-        "markdown.list": Style(),
-        "markdown.item.number": Style(color=_TEXT),
+        "markdown.paragraph": Style(color=_SECONDARY),
+        "markdown.em": Style(italic=True, color=_SECONDARY),
+        "markdown.list": Style(color=_SECONDARY),
+        "markdown.item.number": Style(color=_SECONDARY),
         "markdown.block_quote": Style(color=_MUTED),
         "markdown.hr": Style(color=_MUTED),
         "markdown.table.border": Style(color=_MUTED),
@@ -397,9 +399,9 @@ class TimelineRow(Static):
         padding: 0 2;
         color: #444444;
     }
-    TimelineRow.thought { color: #262626; }
-    TimelineRow.tool { color: #262626; }
-    TimelineRow.edit { color: #262626; }
+    TimelineRow.thought { color: #444444; }
+    TimelineRow.tool { color: #444444; }
+    TimelineRow.edit { color: #444444; }
     TimelineRow.muted {
         height: auto;
         color: #767676;
@@ -616,7 +618,7 @@ class Prose(Static):
         width: 1fr;
         margin: 1 3 1 3;
         background: #f5f5f5;
-        color: #262626;
+        color: #444444;
     }
     """
 
@@ -669,6 +671,20 @@ class PromptInput(Input):
         Binding("down", "slash_down", show=False),
     ]
     DEFAULT_CSS = """
+    PromptInput {
+        color: #1d1d1f;
+    }
+    PromptInput > .input--value {
+        color: #1d1d1f;
+    }
+    PromptInput > .input--cursor {
+        background: #000000;
+        color: #ffffff;
+        text-style: none;
+    }
+    PromptInput > .input--placeholder {
+        color: #8e8e93;
+    }
     PromptInput > .input--suggestion {
         color: #8e8e93;
     }
@@ -676,6 +692,13 @@ class PromptInput(Input):
         color: #2F64D2;
     }
     """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.cursor_blink = False
+
+    def _restart_blink(self) -> None:
+        self._pause_blink(visible=True)
 
     def action_slash_tab(self) -> None:
         complete = getattr(self.app, "complete_slash", None)
@@ -1048,7 +1071,7 @@ class SparkTui(App):
     Screen {
         layout: vertical;
         background: #f5f5f5;
-        color: #262626;
+        color: #444444;
     }
     #chrome {
         height: 1;
@@ -1130,6 +1153,7 @@ class SparkTui(App):
     #prompt {
         width: 1fr;
         height: 1;
+        color: #1d1d1f;
         background: #f5f5f5;
         border: none;
         padding: 0 1 0 0;
@@ -1137,6 +1161,15 @@ class SparkTui(App):
     #prompt:focus {
         border: none;
         background-tint: 0%;
+        color: #1d1d1f;
+    }
+    #prompt > .input--value {
+        color: #1d1d1f;
+    }
+    #prompt > .input--cursor {
+        background: #000000;
+        color: #ffffff;
+        text-style: none;
     }
     #prompt > .input--placeholder {
         color: #8e8e93;

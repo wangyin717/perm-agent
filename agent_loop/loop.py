@@ -134,9 +134,9 @@ class ReactAgentLoop(AgentLoop):
         if plan.action == "continue_llm":
             # 上一轮已经有 tool_result 在等 LLM 收尾，这句新问题不能夹在中间打断，
             # 先当 steer 排队，等这一轮说完再喂给模型。
-            self.inbox.push_steer(user_query)
+            self.inbox.push_steer(user_query, user_action_data.get("media"))
         elif should_append_user(plan, user_query):
-            self._log.append_entry("user", content=user_query)
+            self._append_user(user_query, user_action_data.get("media"))
             log_user(user_query)
         else:
             # start_llm 且盘上最后一条 user 就是这句问题：说明是崩溃后原样重跑，不重复写。
@@ -302,13 +302,32 @@ class ReactAgentLoop(AgentLoop):
             for text in follow:
                 self.inbox.push_steer(text)
 
+    def _append_user(self, text: str, media: Any = None) -> None:
+        fields: Dict[str, Any] = {"content": text}
+        if media:
+            fields["media"] = media
+        self._log.append_entry("user", **fields)
+        if isinstance(media, list):
+            from pathlib import Path as _Path
+
+            for item in media:
+                if isinstance(item, dict) and item.get("kind") == "image":
+                    path = str(item.get("path") or "")
+                    logging.info("[user] attached image: %s", _Path(path).name if path else "")
+
     def _inject_steer(self, messages: list, tracker: ContextUsageTracker) -> None:
         """把用户在这一轮跑着的时候插的话，当成新的 user 消息塞进当前 messages。"""
-        for text in self.inbox.drain_steer():
-            self._log.append_entry("user", content=text)
-            msg = {"role": "user", "content": text}
+        from agent_loop.recover import user_api_message
+
+        llm = self._get_llm()
+        for text, media in self.inbox.drain_steer():
+            self._append_user(text, media or None)
+            row = {"content": text, "media": media or []}
+            msg = user_api_message(
+                row, supports_images=getattr(llm, "supports_images", False)
+            )
             messages.append(msg)
-            tracker.add_estimate(msg)  # steer 是新内容，本地估算里得算上，真实 usage 还没到
+            tracker.add_estimate({"role": "user", "content": text})
             log_user(text)
 
     def _begin_llm_step(self) -> str:

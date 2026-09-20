@@ -41,6 +41,24 @@ def test_replay_and_read_only():
     assert _lock_path(TOOLS["web_fetch"], {"url": "https://example.com"}, ".") is None
 
 
+def test_schema_tells_model_not_to_bash_or_json_load():
+    import json
+
+    from agent_loop.tools.web_fetch_tool import NAME
+
+    path = Path(__file__).resolve().parents[1] / "agent_loop" / "tools" / "tool_schemas.json"
+    schemas = json.loads(path.read_text(encoding="utf-8"))
+    desc = ""
+    for item in schemas:
+        if item.get("function", {}).get("name") == NAME:
+            desc = item["function"]["description"]
+            break
+    assert "grep or read" in desc
+    assert "json.load" in desc
+    assert "Do not bash that file" in desc
+    assert "[web_fetch] url" in desc
+
+
 def test_normalize_upgrades_http():
     assert normalize_url("http://example.com/a") == "https://example.com/a"
 
@@ -238,6 +256,8 @@ def test_saves_full_page_returns_stub(tmp_path, monkeypatch):
     assert "line 0" in out
     assert "line 79" not in out
     assert "grep or read the saved path" in out
+    assert "json.load" in out
+    assert "Do not bash it" in out
     fetch_dir = session_dir / "workspace" / "tools_result" / "web_fetch"
     files = list(fetch_dir.iterdir())
     assert len(files) == 1

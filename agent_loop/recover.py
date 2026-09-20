@@ -178,6 +178,40 @@ def visible_entries(rows: List[Dict[str, Any]], covers_upto_seq: int) -> List[Di
     ]
 
 
+def user_api_message(row: Dict[str, Any], *, supports_images: bool) -> Dict[str, Any]:
+    """user entry → API 消息。贴图挂在这条真正的 user 上（DeepSeek 只允许 user 带图）。"""
+    text = str(row.get("content") or "")
+    raw_media = row.get("media") or []
+    if not isinstance(raw_media, list):
+        raw_media = [raw_media] if raw_media else []
+    images = [
+        item
+        for item in raw_media
+        if isinstance(item, dict) and item.get("kind") == "image"
+    ]
+    if not images:
+        return {"role": "user", "content": text}
+    if not supports_images:
+        note = text.rstrip() + "\n" + IMAGE_OMIT_NOTE
+        return {"role": "user", "content": note}
+    from pathlib import Path as _Path
+
+    blocks: List[Dict[str, Any]] = [{"type": "text", "text": text}]
+    for item in images:
+        path = str(item.get("path") or "")
+        mime = str(item.get("mime") or "image/png")
+        data_url = encode_image_data_url(path, mime) if path else None
+        if data_url:
+            logging.info("[llm] attached image: %s", _Path(path).name)
+            blocks.append({"type": "image_url", "image_url": {"url": data_url}})
+        else:
+            blocks[0]["text"] = (
+                str(blocks[0].get("text") or "").rstrip()
+                + "\n[Image file missing or unreadable.]"
+            )
+    return {"role": "user", "content": blocks}
+
+
 def tool_result_api_messages(
     row: Dict[str, Any],
     content: str,
@@ -324,7 +358,7 @@ def entries_to_messages(
         entry_type = row.get("type")
         if entry_type == "user":
             flush_assistant()
-            messages.append({"role": "user", "content": row.get("content") or ""})
+            messages.append(user_api_message(row, supports_images=supports_images))
         elif entry_type == "assistant":
             flush_assistant()
             pending_assistant = row

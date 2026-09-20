@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import List
+from typing import Any, List, Optional, Tuple
 
 
 class UserInbox:
     def __init__(self):
-        self._steer: deque[str] = deque()
+        self._steer: deque[Tuple[str, List[Any]]] = deque()
         self._follow_up: deque[str] = deque()
 
-    def push_steer(self, text: str) -> None:
+    def push_steer(self, text: str, media: Optional[List[Any]] = None) -> None:
         text = (text or "").strip()
         if text:
-            self._steer.append(text)
+            self._steer.append((text, list(media or [])))
 
     def push_follow_up(self, text: str) -> None:
         text = (text or "").strip()
@@ -24,7 +24,7 @@ class UserInbox:
     def has_steer(self) -> bool:
         return bool(self._steer)
 
-    def drain_steer(self) -> List[str]:
+    def drain_steer(self) -> List[Tuple[str, List[Any]]]:
         items = list(self._steer)
         self._steer.clear()
         return items

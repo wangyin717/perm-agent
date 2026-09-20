@@ -144,7 +144,7 @@
     "type": "function",
     "function": {
       "name": "web_fetch",
-      "description": "Fetch a public http(s) URL. HTML becomes readable text and the full page is saved to a session file. The tool result is a short preview plus the saved path — grep or read that path (set path= the file) to find content. Use when the user pastes a link or a search hit needs the page body. Fails for private/localhost URLs, login walls, PDFs, and JavaScript-only apps. Prefer this over bash curl.",
+      "description": "Fetch a public http(s) URL. HTML becomes readable text; JSON and plain text stay as text. The full page is saved as UTF-8 under tools_result/web_fetch/: a `[web_fetch] url` header, then the body. It is not raw HTTP bytes and not guaranteed valid JSON. The tool result is a short preview plus the saved path — grep or read that path (set path= the file). Do not bash that file and do not json.load the whole file. Use when the user pastes a link or a search hit needs the page body. Fails for private/localhost URLs, login walls, PDFs, and JavaScript-only apps. Prefer this over bash curl.",
       "parameters": {
         "type": "object",
         "properties": {

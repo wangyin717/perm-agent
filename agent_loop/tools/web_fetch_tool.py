@@ -22,7 +22,7 @@ MAX_URL_LENGTH = 2000
 MAX_REDIRECTS = 10
 MAX_CONTENT_BYTES = 5 * 1024 * 1024
 TIMEOUT_SEC = 30
-USER_AGENT = "Mozilla/5.0 (compatible; spark-agent/0.1)"
+USER_AGENT = "Mozilla/5.0 (compatible; Permanent/0.1)"
 PREVIEW_LINES = 30
 PREVIEW_CHARS = 2000
 
@@ -134,7 +134,9 @@ def _stub(url: str, saved: str, full: str) -> str:
         f"chars: {len(full)}\n\n"
         f"{preview}\n\n"
         "To find something on this page, grep or read the saved path "
-        "(pass path= that file). Do not bash curl the URL again."
+        "(pass path= that file). The file is UTF-8 text: a [web_fetch] url "
+        "header, then the body — not raw JSON. Do not bash it, do not "
+        "json.load the whole file, and do not bash curl the URL again."
     )
 
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import sys
 import time
 from datetime import datetime
 from io import StringIO
@@ -24,6 +26,7 @@ from textual.containers import Horizontal, VerticalGroup, VerticalScroll
 from textual.markup import escape as markup_escape
 from textual.selection import Selection
 from textual.visual import RenderOptions
+from textual.events import Paste
 from textual.widgets import Input, Static
 
 from agent_loop import events
@@ -38,6 +41,18 @@ from agent_loop.session_title import (
     set_manual_title,
 )
 from agent_loop.session_log import SessionLog
+from agent_loop.prompt_images import (
+    chip_for_backspace,
+    chip_for_delete,
+    expand_range_to_chips,
+    next_image_number,
+    persist_image_bytes,
+    persist_image_file,
+    placeholders_in_text,
+    read_clipboard_image_bytes,
+    snap_cursor_out_of_chip,
+    try_read_dropped_paths,
+)
 
 HELP = """commands:
   /help      this list
@@ -73,6 +88,30 @@ def parse_slash(text: str) -> Optional[str]:
     if name in ("/rename", "/title"):
         return "rename"
     return None
+
+
+SLASH_COMMANDS = (
+    ("/help", "this list", False),
+    ("/new", "new session", False),
+    ("/resume", "list sessions", False),
+    ("/rename", "set session title", True),
+    ("/session", "show session id and path", False),
+    ("/exit", "quit", False),
+    ("/quit", "quit", False),
+)
+
+
+def slash_prefix(text: str) -> Optional[str]:
+    raw = text or ""
+    if not raw.startswith("/") or " " in raw or "\n" in raw:
+        return None
+    return raw.lower()
+
+
+def matching_slash(prefix: str) -> List[Tuple[str, str, bool]]:
+    if prefix == "/":
+        return list(SLASH_COMMANDS)
+    return [item for item in SLASH_COMMANDS if item[0].startswith(prefix)]
 
 
 def _basename(path: str) -> str:
@@ -619,6 +658,280 @@ class Prose(Static):
         return extracted, "\n"
 
 
+class PromptInput(Input):
+    """粘贴：整段绝对图片路径或剪贴板位图变成 [Image #N]。chip 整块删、整块跳。"""
+
+    BINDINGS = [
+        Binding("tab", "slash_tab", show=False),
+        Binding("up", "slash_up", show=False),
+        Binding("down", "slash_down", show=False),
+    ]
+    DEFAULT_CSS = """
+    PromptInput > .input--suggestion {
+        color: #8e8e93;
+    }
+    PromptInput.-slash-cmd {
+        color: #2F64D2;
+    }
+    """
+
+    def action_slash_tab(self) -> None:
+        complete = getattr(self.app, "complete_slash", None)
+        if callable(complete) and complete():
+            return
+
+    def action_slash_up(self) -> None:
+        move = getattr(self.app, "move_slash", None)
+        if callable(move) and move(-1):
+            return
+
+    def action_slash_down(self) -> None:
+        move = getattr(self.app, "move_slash", None)
+        if callable(move) and move(1):
+            return
+
+
+    def _sync_draft(self) -> None:
+        sync = getattr(self.app, "sync_draft_images", None)
+        if callable(sync):
+            sync(self.value)
+
+    def _delete_span(self, start: int, end: int) -> None:
+        self.delete(*expand_range_to_chips(self.value, start, end))
+        self._sync_draft()
+
+    def _on_paste(self, event: Paste) -> None:
+        attach = getattr(self.app, "attach_paste_text", None)
+        if callable(attach) and attach(event.text or ""):
+            event.stop()
+            return
+        super()._on_paste(event)
+
+    def action_paste(self) -> None:
+        attach = getattr(self.app, "attach_paste_text", None)
+        clip_text = getattr(self.app, "clipboard", "") or ""
+        if callable(attach) and clip_text and attach(clip_text):
+            return
+        clip_img = getattr(self.app, "attach_clipboard_image", None)
+        if callable(clip_img) and clip_img():
+            return
+        super().action_paste()
+
+    def action_delete_left(self) -> None:
+        if not self.selection.is_empty:
+            self._delete_span(*self.selection)
+            return
+        span = chip_for_backspace(self.value, self.cursor_position)
+        if span:
+            self._delete_span(*span)
+            return
+        super().action_delete_left()
+        self._sync_draft()
+
+    def action_delete_right(self) -> None:
+        if not self.selection.is_empty:
+            self._delete_span(*self.selection)
+            return
+        span = chip_for_delete(self.value, self.cursor_position)
+        if span:
+            self._delete_span(*span)
+            return
+        super().action_delete_right()
+        self._sync_draft()
+
+    def action_delete_left_word(self) -> None:
+        if not self.selection.is_empty:
+            self._delete_span(*self.selection)
+            return
+        span = chip_for_backspace(self.value, self.cursor_position)
+        if span:
+            self._delete_span(*span)
+            return
+        super().action_delete_left_word()
+        self._sync_draft()
+
+    def action_delete_right_word(self) -> None:
+        if not self.selection.is_empty:
+            self._delete_span(*self.selection)
+            return
+        span = chip_for_delete(self.value, self.cursor_position)
+        if span:
+            self._delete_span(*span)
+            return
+        super().action_delete_right_word()
+        self._sync_draft()
+
+    def action_cursor_left(self, select: bool = False) -> None:
+        if not select and self.selection.is_empty:
+            span = chip_for_backspace(self.value, self.cursor_position)
+            if span:
+                self.cursor_position = span[0]
+                return
+        super().action_cursor_left(select)
+        if not select:
+            snapped = snap_cursor_out_of_chip(self.value, self.cursor_position)
+            if snapped != self.cursor_position:
+                self.cursor_position = snapped
+
+    def action_cursor_right(self, select: bool = False) -> None:
+        if not select and self.selection.is_empty:
+            span = chip_for_delete(self.value, self.cursor_position)
+            if span:
+                self.cursor_position = span[1]
+                return
+        super().action_cursor_right(select)
+        if not select:
+            snapped = snap_cursor_out_of_chip(self.value, self.cursor_position)
+            if snapped != self.cursor_position:
+                self.cursor_position = snapped
+
+    async def _on_key(self, event) -> None:
+        if event.is_printable and self.selection.is_empty:
+            span = chip_for_delete(self.value, self.cursor_position)
+            if span and span[0] < self.cursor_position < span[1]:
+                event.stop()
+                self._delete_span(*span)
+                self.insert(event.character or "", self.cursor_position)
+                return
+        await super()._on_key(event)
+
+    async def _on_mouse_down(self, event) -> None:
+        await super()._on_mouse_down(event)
+        snapped = snap_cursor_out_of_chip(self.value, self.cursor_position)
+        if snapped != self.cursor_position:
+            self.cursor_position = snapped
+
+
+def slash_row_text(name: str, hint: str, selected: bool = False, prefix: str = "/") -> Text:
+    mark = "›" if selected else " "
+    body = Text()
+    body.append(f"{mark} ", style=_TEXT)
+    typed = prefix if prefix and prefix != "/" else ""
+    matched = len(typed) if typed and name.lower().startswith(typed.lower()) else 0
+    if matched:
+        body.append(name[:matched], style=_BLUE)
+        body.append(name[matched:], style=_TEXT)
+    else:
+        body.append(name, style=_TEXT)
+    body.append(" " * max(1, 12 - len(name)))
+    body.append(hint, style=_MUTED)
+    return body
+
+
+class SlashRow(Static):
+    DEFAULT_CSS = """
+    SlashRow {
+        color: auto;
+    }
+    """
+
+    def __init__(
+        self,
+        name: str,
+        hint: str,
+        needs_arg: bool,
+        selected: bool = False,
+        prefix: str = "/",
+    ) -> None:
+        super().__init__(slash_row_text(name, hint, selected, prefix), markup=False)
+        self.cmd_name = name
+        self.hint = hint
+        self.needs_arg = needs_arg
+        self.set_class(selected, "selected")
+
+    def on_click(self) -> None:
+        pick = getattr(self.app, "pick_slash_row", None)
+        if callable(pick):
+            pick(self.cmd_name, self.needs_arg)
+
+
+class SlashMenu(VerticalGroup):
+    """输入 / 时贴在输入框上方的命令列表。"""
+
+    DEFAULT_CSS = """
+    SlashMenu {
+        width: 100%;
+        height: auto;
+        max-height: 10;
+        layout: vertical;
+        background: #e4e4e6;
+        padding: 0 0;
+        display: none;
+    }
+    SlashMenu SlashRow {
+        width: 1fr;
+        height: 1;
+        padding: 0 1;
+    }
+    SlashMenu SlashRow.selected {
+        background: #d0d0d4;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__(id="slash-menu")
+        self.matches: List[Tuple[str, str, bool]] = []
+        self.index = 0
+        self.prefix = "/"
+
+    @property
+    def is_open(self) -> bool:
+        return bool(self.display) and bool(self.matches)
+
+    @property
+    def current(self) -> Optional[Tuple[str, str, bool]]:
+        if not self.matches:
+            return None
+        return self.matches[self.index]
+
+    def close(self) -> None:
+        self.matches = []
+        self.index = 0
+        self.prefix = "/"
+        self.display = False
+        for child in list(self.children):
+            child.remove()
+
+    def show(self, rows: List[Tuple[str, str, bool]], prefix: str = "/") -> None:
+        keep = self.current[0] if self.current else None
+        self.matches = rows
+        self.prefix = prefix
+        if not rows:
+            self.close()
+            return
+        names = [item[0] for item in rows]
+        matching_names = [name for name in names if name.lower().startswith(prefix.lower())]
+        if keep in matching_names:
+            self.index = names.index(keep)
+        elif matching_names:
+            self.index = names.index(matching_names[0])
+        else:
+            self.index = 0
+        self.display = True
+        self._rebuild()
+
+    def move(self, delta: int) -> bool:
+        if not self.is_open:
+            return False
+        self.index = (self.index + delta) % len(self.matches)
+        self._rebuild()
+        return True
+
+    def _rebuild(self) -> None:
+        for child in list(self.children):
+            child.remove()
+        for i, (name, hint, needs_arg) in enumerate(self.matches):
+            self.mount(
+                SlashRow(
+                    name,
+                    hint,
+                    needs_arg,
+                    selected=(i == self.index),
+                    prefix=self.prefix,
+                )
+            )
+
+
 class Timeline(VerticalScroll):
     """时间线：滚动立刻跳，不要默认的惯性动画。"""
 
@@ -641,8 +954,93 @@ class Timeline(VerticalScroll):
         self.scroll_end(animate=False, immediate=True)
 
 
+def _shrink_ascii(text: str, fy: int = 2, fx: int = 2) -> str:
+    """把点阵按块收成更小的一块，启动卡片用。"""
+    lines = [line.rstrip() for line in text.splitlines()]
+    if not lines:
+        return text
+    width = max(len(line) for line in lines)
+    padded = [line.ljust(width) for line in lines]
+    rank = {ch: i for i, ch in enumerate(" `.'-:,;^=+/<>*|#%&$@")}
+    out: List[str] = []
+    for y in range(0, len(padded), fy):
+        row: List[str] = []
+        for x in range(0, width, fx):
+            block = ""
+            for dy in range(fy):
+                if y + dy < len(padded):
+                    block += padded[y + dy][x : x + fx]
+            best, best_d = " ", -1
+            for ch in block:
+                dens = rank.get(ch, 8)
+                if dens > best_d:
+                    best, best_d = ch, dens
+            row.append(best)
+        out.append("".join(row).rstrip())
+    while out and not out[0].strip():
+        out.pop(0)
+    while out and not out[-1].strip():
+        out.pop()
+    indent = min((len(line) - len(line.lstrip()) for line in out if line.strip()), default=0)
+    dotted = []
+    for line in out:
+        dotted.append("".join("." if ch != " " else " " for ch in line[indent:]))
+    return "\n".join(dotted)
+
+
+ENDURANCE_SRC = Path(__file__).with_name("endurance.txt").read_text(encoding="utf-8")
+ENDURANCE_ART = _shrink_ascii(ENDURANCE_SRC)
+
+
+def _splash_copy() -> Text:
+    text = Text()
+    text.append("Permanent", style="bold")
+    text.append("  local coding agent\n\n", style="#8e8e93")
+    for name, key in (
+        ("New session", "/new"),
+        ("Resume", "/resume"),
+        ("Help", "/help"),
+    ):
+        text.append(f"{name:<22}", style="#262626")
+        text.append(f"{key}\n", style="#8e8e93")
+    return text
+
+
+class SplashCard(Horizontal):
+    """空会话时的居中卡片：永恒号 + Permanent。"""
+
+    DEFAULT_CSS = """
+    SplashCard {
+        width: 88;
+        max-width: 100%;
+        height: auto;
+        padding: 2 3;
+        border: round #d5d5d8;
+        background: #f3f3f4;
+        layout: horizontal;
+        align: left middle;
+    }
+    SplashCard #ship {
+        width: auto;
+        height: auto;
+        color: #8e8e93;
+        padding: 0 3 0 1;
+    }
+    SplashCard #blurb {
+        width: 1fr;
+        height: auto;
+        padding: 1 1 1 2;
+        color: #262626;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static(ENDURANCE_ART, id="ship", markup=False)
+        yield Static(_splash_copy(), id="blurb")
+
+
 class SparkTui(App):
-    TITLE = "spark-agent"
+    TITLE = "Permanent"
     ALLOW_SELECT = True
     CSS = """
     Screen {
@@ -661,6 +1059,10 @@ class SparkTui(App):
         background: #eeeeee;
         overflow-x: hidden;
         overflow-y: scroll;
+    }
+    #timeline.-splash {
+        align: center middle;
+        overflow-y: hidden;
     }
     #timeline > .turn {
         height: auto;
@@ -737,6 +1139,9 @@ class SparkTui(App):
     #prompt > .input--placeholder {
         color: #8e8e93;
     }
+    #prompt.-slash-cmd {
+        color: #2F64D2;
+    }
     """
     BINDINGS = [
         Binding("ctrl+c", "copy_selection", "Copy", show=False),
@@ -775,26 +1180,34 @@ class SparkTui(App):
         self._resume_items: List[Dict] = []
         self._resume_page = 0
         self._resume_from_id = ""
+        self._draft_images: List[Dict] = []
+        self._attaching_drop = False
+        self._stdio_log_handlers: List = []
 
     def compose(self) -> ComposeResult:
         yield Static("", id="chrome")
         yield Timeline(id="timeline")
+        yield SlashMenu()
         with Horizontal(id="prompt-wrap"):
             yield Static("›", id="prompt-mark")
-            yield Input(placeholder="Message or /help", id="prompt", compact=True)
+            yield PromptInput(placeholder="Message or /help", id="prompt", compact=True)
 
     def on_mount(self) -> None:
         events.print_to_stdout = False
+        self._stdio_log_handlers = _quiet_stdio_logging()
         self.console.push_theme(_PROSE_THEME)
         self._unsub = events.subscribe(self._on_event)
         path = session_log_path_for(self.workspace, self.session_id)
         self._refresh_chrome()
         self.set_interval(0.1, self._tick_think)
         self._replay_log(path)
+        self._maybe_show_splash()
         self.query_one("#prompt", Input).focus()
 
     def on_unmount(self) -> None:
         events.print_to_stdout = True
+        _restore_stdio_logging(self._stdio_log_handlers)
+        self._stdio_log_handlers = []
         try:
             self.console.pop_theme()
         except Exception:
@@ -806,7 +1219,29 @@ class SparkTui(App):
     def _timeline(self) -> Timeline:
         return self.query_one("#timeline", VerticalScroll)
 
+    def _timeline_is_empty(self) -> bool:
+        tl = self._timeline()
+        return not list(tl.query(".turn")) and not list(tl.query(ResumePicker))
+
+    def _show_splash(self) -> None:
+        tl = self._timeline()
+        if list(tl.query(SplashCard)):
+            return
+        tl.add_class("-splash")
+        tl.mount(SplashCard())
+
+    def _hide_splash(self) -> None:
+        tl = self._timeline()
+        tl.remove_class("-splash")
+        for card in list(tl.query(SplashCard)):
+            card.remove()
+
+    def _maybe_show_splash(self) -> None:
+        if self._timeline_is_empty():
+            self._show_splash()
+
     def _start_turn(self, text: str) -> VerticalGroup:
+        self._hide_splash()
         self._end_think()
         turn = VerticalGroup(classes="turn")
         self._timeline().mount(turn)
@@ -1002,9 +1437,120 @@ class SparkTui(App):
     def _set_status(self, text: str) -> None:
         return
 
+    def _session_dir(self) -> Path:
+        return session_log_path_for(self.workspace, self.session_id).parent
+
+    def sync_draft_images(self, text: str) -> None:
+        used = set(placeholders_in_text(text))
+        self._draft_images = [
+            item for item in self._draft_images if int(item.get("n") or 0) in used
+        ]
+
+    def _insert_image_chip(self, dest: Path, mime: str, *, replace_all: bool = False) -> None:
+        prompt = self.query_one("#prompt", Input)
+        n = next_image_number(prompt.value, self._draft_images)
+        self._draft_images.append({"n": n, "path": str(dest), "mime": mime})
+        start, end = (0, len(prompt.value)) if replace_all else prompt.selection
+        before = prompt.value[:start]
+        after = prompt.value[end:]
+        token = f"[Image #{n}]"
+        if before and not before[-1].isspace():
+            token = " " + token
+        if after and not after[0].isspace():
+            token = token + " "
+        prompt.replace(token, start, end)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """终端拖文件常常不是 Paste 事件，而是把带引号的路径打进输入框。"""
+        if event.input.id != "prompt" or self._attaching_drop:
+            return
+        text = event.value or ""
+        dropped = try_read_dropped_paths(text)
+        if dropped and any(kind == "image" for kind, _ in dropped):
+            self._attaching_drop = True
+            try:
+                self.attach_paste_text(text, replace_all=True)
+            finally:
+                self._attaching_drop = False
+            self._refresh_slash_menu(event.input.value or "")
+            return
+        self.sync_draft_images(text)
+        self._refresh_slash_menu(text)
+
+    def attach_paste_text(self, text: str, *, replace_all: bool = False) -> bool:
+        dropped = try_read_dropped_paths(text)
+        if not dropped:
+            return False
+        attached = False
+        session_dir = self._session_dir()
+        for kind, path in dropped:
+            if kind != "image":
+                prompt = self.query_one("#prompt", Input)
+                start, end = (0, len(prompt.value)) if replace_all else prompt.selection
+                prompt.replace(str(path) + " ", start, end)
+                attached = True
+                replace_all = False
+                continue
+            try:
+                dest, mime = persist_image_file(path, session_dir)
+            except (OSError, ValueError):
+                continue
+            self._insert_image_chip(dest, mime, replace_all=replace_all)
+            attached = True
+            replace_all = False
+        return attached
+
+    def attach_clipboard_image(self) -> bool:
+        got = read_clipboard_image_bytes()
+        if not got:
+            return False
+        data, mime = got
+        try:
+            dest = persist_image_bytes(data, mime, self._session_dir())
+        except ValueError:
+            return False
+        self._insert_image_chip(dest, mime)
+        return True
+
+    def _take_submit_media(self, text: str) -> List[Dict]:
+        used = set(placeholders_in_text(text))
+        media: List[Dict] = []
+        keep: List[Dict] = []
+        for item in self._draft_images:
+            if int(item.get("n") or 0) in used:
+                media.append(
+                    {
+                        "kind": "image",
+                        "mime": item.get("mime") or "image/png",
+                        "path": item.get("path") or "",
+                    }
+                )
+            else:
+                keep.append(item)
+        self._draft_images = keep
+        return media
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
-        text = (event.value or "").strip()
+        menu = self._slash_menu()
+        typed = event.value or ""
+        prefix = slash_prefix(typed)
+        if (
+            menu.is_open
+            and menu.current
+            and prefix
+            and menu.current[0].lower().startswith(prefix.lower())
+        ):
+            name, _, needs_arg = menu.current
+            if needs_arg:
+                event.input.value = name + " "
+                event.input.cursor_position = len(event.input.value)
+                menu.close()
+                return
+            text = name
+        else:
+            text = typed.strip()
         event.input.value = ""
+        menu.close()
         if not text:
             return
         cmd = parse_slash(text)
@@ -1012,10 +1558,12 @@ class SparkTui(App):
             await self._run_command(cmd, text)
             return
         if text.startswith("/"):
+            self._hide_splash()
             self._timeline().mount(TimelineRow(_mark("unknown command. type /help"), classes="muted"))
             return
+        media = self._take_submit_media(text)
         if self._busy:
-            self.loop.inbox.push_steer(text)
+            self.loop.inbox.push_steer(text, media)
             if self._turn is not None:
                 self._turn.mount(UserBanner(f"›  {text}"))
             return
@@ -1024,7 +1572,7 @@ class SparkTui(App):
         self._busy_t0 = time.monotonic()
         self._pending_user = text
         self._start_turn(text)
-        self.run_worker(self._run_turn(text), exclusive=True, group="turn")
+        self.run_worker(self._run_turn(text, media), exclusive=True, group="turn")
 
     async def _run_command(self, cmd: str, raw: str = "") -> None:
         arg = raw.split(None, 1)[1].strip() if len(raw.split(None, 1)) > 1 else ""
@@ -1032,9 +1580,11 @@ class SparkTui(App):
             self.exit()
             return
         if cmd == "help":
+            self._hide_splash()
             self._timeline().mount(Prose(HELP))
             return
         if cmd == "session":
+            self._hide_splash()
             path = session_log_path_for(self.workspace, self.session_id)
             self._timeline().mount(TimelineRow(_mark(str(self.session_id)), classes="muted"))
             self._timeline().mount(TimelineRow(_mark(str(path)), classes="muted"))
@@ -1053,10 +1603,11 @@ class SparkTui(App):
     def _refresh_chrome(self) -> None:
         ensure_auto_title(self.workspace, self.session_id)
         label = display_title(self.workspace, self.session_id)
-        self.query_one("#chrome", Static).update(f"spark-agent  {label}")
+        self.query_one("#chrome", Static).update(f"Permanent  {label}")
 
     def _rename_session(self, arg: str) -> None:
         if not arg:
+            self._hide_splash()
             self._timeline().mount(
                 TimelineRow(_mark("usage: /rename <title>  or  /rename --auto"), classes="muted")
             )
@@ -1067,12 +1618,14 @@ class SparkTui(App):
             meta = set_manual_title(self.workspace, self.session_id, arg)
         self._refresh_chrome()
         shown = meta.get("title") or self.session_id
+        self._hide_splash()
         self._timeline().mount(TimelineRow(_mark(f"title  {shown}"), classes="muted"))
         self._scroll_follow()
 
     async def _resume_session(self, arg: str) -> None:
         sessions = list_sessions(self.workspace)
         if not sessions:
+            self._hide_splash()
             self._timeline().mount(TimelineRow(_mark("no sessions in this project"), classes="muted"))
             return
         if not arg:
@@ -1096,6 +1649,7 @@ class SparkTui(App):
             if len(matches) == 1:
                 chosen = matches[0]
         if chosen is None:
+            self._hide_splash()
             self._timeline().mount(
                 TimelineRow(_mark(f"no session matches {arg}. type /resume"), classes="muted")
             )
@@ -1123,6 +1677,7 @@ class SparkTui(App):
         self._resume_page = page
         start = page * _RESUME_PAGE
         chunk = items[start : start + _RESUME_PAGE]
+        self._hide_splash()
         timeline = self._timeline()
         await timeline.remove_children()
         name = Path(self.workspace).name or "sessions"
@@ -1173,6 +1728,8 @@ class SparkTui(App):
         self._resume_items = []
         self._resume_page = 0
         self._resume_from_id = ""
+        self._draft_images = []
+        self._attaching_drop = False
         timeline = self._timeline()
         await timeline.remove_children()
         if replay:
@@ -1180,18 +1737,22 @@ class SparkTui(App):
             self._replay_log(session_log_path_for(self.workspace, self.session_id))
             self._refresh_chrome()
             self._set_status(_IDLE)
+            self._maybe_show_splash()
             self._timeline().focus()
             return
         self._refresh_chrome()
         self._set_status(_IDLE)
+        self._show_splash()
         self.query_one("#prompt", Input).focus()
 
-    async def _run_turn(self, query: str) -> None:
+    async def _run_turn(self, query: str, media: Optional[List[Dict]] = None) -> None:
         uad = {
             "sessionId": self.session_id,
             "workspace": self.workspace,
             "install_sigint": False,
         }
+        if media:
+            uad["media"] = media
         try:
             await self.loop._run_loop(query, uad)
         except Exception as exc:
@@ -1255,7 +1816,88 @@ class SparkTui(App):
             raise SkipAction()
         self.copy_to_clipboard(text)
 
+    def _slash_menu(self) -> SlashMenu:
+        return self.query_one("#slash-menu", SlashMenu)
+
+    def _refresh_slash_menu(self, text: str) -> None:
+        prefix = slash_prefix(text)
+        menu = self._slash_menu()
+        if prefix is None:
+            menu.close()
+            self.query_one("#prompt", Input).set_class(False, "-slash-cmd")
+            self._sync_slash_suggestion()
+            return
+        hits = matching_slash(prefix)
+        if not hits:
+            menu.close()
+            self.query_one("#prompt", Input).set_class(True, "-slash-cmd")
+            self._sync_slash_suggestion()
+            return
+        menu.show(hits, prefix)
+        prompt = self.query_one("#prompt", Input)
+        prompt.set_class(True, "-slash-cmd")
+        self._sync_slash_suggestion()
+
+    def _sync_slash_suggestion(self) -> None:
+        prompt = self.query_one("#prompt", Input)
+        menu = self._slash_menu()
+        value = prompt.value or ""
+        suggestion = ""
+        if menu.is_open and menu.current:
+            name = menu.current[0]
+            if name.lower().startswith(value.lower()):
+                suggestion = value + name[len(value) :]
+        prompt._suggestion = suggestion
+
+    def complete_slash(self) -> bool:
+        menu = self._slash_menu()
+        if not menu.is_open:
+            return False
+        prompt = self.query_one("#prompt", Input)
+        prefix = slash_prefix(prompt.value or "") or ""
+        current = menu.current
+        if current and current[0].lower().startswith(prefix.lower()):
+            name, _, needs_arg = current
+        else:
+            hits = matching_slash(prefix)
+            if not hits:
+                return False
+            name, _, needs_arg = hits[0]
+        filled = name + (" " if needs_arg else "")
+        prompt.value = filled
+        prompt.cursor_position = len(filled)
+        if needs_arg:
+            menu.close()
+        else:
+            self._refresh_slash_menu(filled)
+        return True
+
+    def move_slash(self, delta: int) -> bool:
+        moved = self._slash_menu().move(delta)
+        if moved:
+            self._sync_slash_suggestion()
+        return moved
+
+    def pick_slash_row(self, name: str, needs_arg: bool) -> None:
+        prompt = self.query_one("#prompt", Input)
+        if needs_arg:
+            prompt.value = name + " "
+            prompt.cursor_position = len(prompt.value)
+            self._slash_menu().close()
+            prompt.focus()
+            return
+        prompt.value = ""
+        self._slash_menu().close()
+        cmd = parse_slash(name)
+        if cmd:
+            self.run_worker(self._run_command(cmd, name), exclusive=True, group="session")
+
     def action_abort_turn(self) -> None:
+        menu = self._slash_menu()
+        if menu.is_open:
+            menu.close()
+            self._sync_slash_suggestion()
+            return
         if list(self.query(ResumePicker)):
             self.run_worker(self._resume_cancel(), exclusive=True, group="session")
             return
@@ -1283,6 +1925,26 @@ class SparkTui(App):
         tl = self._timeline()
         if tl.max_scroll_y <= 0 or tl.scroll_y >= tl.max_scroll_y - 2:
             self._follow = True
+
+
+def _quiet_stdio_logging() -> List:
+    """TUI 期间不要把 logging 打到终端，否则会盖住输入框。"""
+    root = logging.getLogger()
+    removed = []
+    for handler in list(root.handlers):
+        if not isinstance(handler, logging.StreamHandler):
+            continue
+        stream = getattr(handler, "stream", None)
+        if stream in (sys.stdout, sys.stderr):
+            root.removeHandler(handler)
+            removed.append(handler)
+    return removed
+
+
+def _restore_stdio_logging(handlers: List) -> None:
+    root = logging.getLogger()
+    for handler in handlers:
+        root.addHandler(handler)
 
 
 def run_tui(session_id: Optional[str] = None) -> None:

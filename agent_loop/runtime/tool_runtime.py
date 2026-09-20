@@ -23,6 +23,11 @@ from agent_loop.tools.registry import available_tool_names, get_tool
 from agent_loop.cli.trace import log_tool_result, log_tool_start
 
 
+def _brief_exc(exc: BaseException) -> str:
+    text = str(exc).strip() or type(exc).__name__
+    return text.splitlines()[0][:200]
+
+
 @dataclass
 class _ReadSnap:
     content: str
@@ -167,7 +172,8 @@ class ToolRuntime:
             is_error = False
         except Exception as exc:
             # execute 允许直接 throw；这里统一收口成错误结果，循环不会因为异常中断。
-            logging.warning("[tool] %s failed: %s", name, exc)
+            # 完整错误进 jsonl / TUI 工具行；日志只留一行，避免盖住 TUI。
+            logging.warning("[tool] %s failed: %s", name, _brief_exc(exc))
             content = str(exc)
             media = None
             is_error = True

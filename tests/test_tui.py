@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
-from agent_loop.cli.tui import SparkTui, TimelineRow
+from agent_loop.cli.tui import SparkTui, TimelineRow, matching_slash, slash_prefix
 
 
 def _status(app: SparkTui) -> str:
@@ -72,6 +73,58 @@ def test_markdown_as_text_cache_returns_copy():
     assert len(tui_mod._MD_CACHE) == 1
 
 
+def test_quiet_stdio_logging_hides_warnings(capsys):
+    from agent_loop.cli.tui import _quiet_stdio_logging, _restore_stdio_logging
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.WARNING)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    try:
+        logging.warning("visible-before")
+        assert "visible-before" in capsys.readouterr().err
+        saved = _quiet_stdio_logging()
+        try:
+            logging.warning("hidden-traceback-line")
+            assert "hidden-traceback-line" not in capsys.readouterr().err
+        finally:
+            _restore_stdio_logging(saved)
+        logging.warning("visible-after")
+        assert "visible-after" in capsys.readouterr().err
+    finally:
+        logger.removeHandler(handler)
+
+
+def test_brief_exc_keeps_one_line():
+    from agent_loop.runtime.tool_runtime import _brief_exc
+
+    blob = "Traceback (most recent call last):\n  File x\nJSONDecodeError: nope"
+    assert _brief_exc(RuntimeError(blob)) == "Traceback (most recent call last):"
+
+
+def test_slash_row_command_is_blue():
+    from agent_loop.cli.tui import _BLUE, slash_row_text
+
+    matched = slash_row_text("/resume", "list sessions", selected=True, prefix="/re")
+    assert matched.plain.startswith("› /resume")
+    styles = [(matched.plain[span.start : span.end], str(span.style)) for span in matched.spans]
+    assert any(part == "/re" and _BLUE in style for part, style in styles)
+    assert any(part == "sume" and _BLUE not in style for part, style in styles)
+    bare = slash_row_text("/help", "this list", prefix="/")
+    assert _BLUE not in " ".join(str(span.style) for span in bare.spans)
+
+
+def test_matching_slash_prefix():
+    assert slash_prefix("hello") is None
+    assert slash_prefix("/resume 1") is None
+    assert slash_prefix("/") == "/"
+    names = [item[0] for item in matching_slash("/")]
+    assert "/help" in names and "/new" in names
+    assert [item[0] for item in matching_slash("/re")] == ["/resume", "/rename"]
+    assert matching_slash("/zzz") == []
+
+
 def test_prompt_wraps_chevron():
     async def _run() -> None:
         app = SparkTui("prompt-test", "/tmp/spark-agent-tui-prompt")
@@ -83,6 +136,84 @@ def test_prompt_wraps_chevron():
             assert mark.parent is wrap
             assert "›" in str(mark.content)
             await pilot.pause()
+
+    asyncio.run(_run())
+
+
+def test_splash_on_empty_hides_when_turn_starts(tmp_path, monkeypatch):
+    from agent_loop.cli.tui import ENDURANCE_ART, SplashCard
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    async def _run() -> None:
+        app = SparkTui("empty-splash", str(ws))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            cards = list(app.query(SplashCard))
+            assert len(cards) == 1
+            ship = str(app.query_one("#ship").content)
+            ink = {ch for ch in ship if ch not in " \n"}
+            assert ink == {"."}
+            assert ship.splitlines()[0].strip() == ENDURANCE_ART.splitlines()[0].strip()
+            assert len(ship.splitlines()) <= 16
+            blurb = app.query_one("#blurb").content
+            blurb_text = blurb.plain if hasattr(blurb, "plain") else str(blurb)
+            assert "Permanent" in blurb_text
+            assert "/new" in blurb_text
+            assert "/resume" in blurb_text
+            chrome = str(app.query_one("#chrome").content)
+            assert chrome.startswith("Permanent")
+            app._start_turn("hello")
+            await pilot.pause()
+            assert list(app.query(SplashCard)) == []
+
+    asyncio.run(_run())
+
+
+def test_slash_menu_filters_and_tab_completes(tmp_path, monkeypatch):
+    from agent_loop.cli.tui import SlashMenu, SlashRow
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("SPARK_AGENT_HOME", str(home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    async def _run() -> None:
+        app = SparkTui("slash-menu", str(ws))
+        async with app.run_test(size=(100, 30)) as pilot:
+            prompt = app.query_one("#prompt")
+            prompt.focus()
+            await pilot.press("/")
+            await pilot.pause()
+            menu = app.query_one("#slash-menu", SlashMenu)
+            assert menu.is_open
+            names = [row.cmd_name for row in app.query(SlashRow)]
+            assert "/help" in names
+            assert "/new" in names
+            await pilot.press("r")
+            await pilot.pause()
+            names = [row.cmd_name for row in app.query(SlashRow)]
+            assert names == ["/resume", "/rename"]
+            selected = [row for row in app.query(SlashRow) if "selected" in row.classes]
+            assert selected and selected[0].cmd_name == "/resume"
+            assert "-slash-cmd" in prompt.classes
+            await pilot.press("tab")
+            await pilot.pause()
+            assert prompt.value == "/resume"
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not menu.is_open
+            assert prompt.value == "/resume"
+
+            prompt.value = "/ren"
+            await pilot.pause()
+            await pilot.press("tab")
+            await pilot.pause()
+            assert prompt.value == "/rename "
+            assert not app.query_one("#slash-menu", SlashMenu).is_open
 
     asyncio.run(_run())
 

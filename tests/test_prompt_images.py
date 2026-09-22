@@ -163,6 +163,20 @@ def test_inbox_steer_keeps_media():
     assert box.drain_steer() == [("see [Image #1]", media)]
 
 
+def test_inbox_follow_up_can_cancel_or_send_now():
+    box = UserInbox()
+    media = [{"kind": "image", "mime": "image/png", "path": "/tmp/x.png"}]
+    first = box.push_follow_up("天气", media)
+    second = box.push_follow_up("稍后")
+    assert first and second and first != second
+    assert box.cancel_follow_up(second) is True
+    assert box.cancel_follow_up(second) is False
+    assert box.take_follow_up(first) == ("天气", media)
+    assert box.drain_follow_up() == []
+    box.push_steer("天气", media)
+    assert box.drain_steer() == [("天气", media)]
+
+
 def test_tui_paste_absolute_png_inserts_chip(tmp_path, monkeypatch):
     from agent_loop.cli.tui import SparkTui
 

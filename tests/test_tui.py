@@ -807,6 +807,29 @@ def test_waiting_notice_diamond_blinks_until_tool_returns():
     asyncio.run(_run())
 
 
+def test_click_prompt_border_focuses_input():
+    async def _run() -> None:
+        app = SparkTui("prompt-edge", "/tmp/spark-agent-tui-prompt-edge")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            app.query_one("#timeline").focus()
+            await pilot.pause()
+            assert app.focused.id != "prompt"
+            wrap = app.query_one("#prompt-wrap")
+            assert wrap.region.x == 2
+            assert wrap.region.x + wrap.region.width == 78
+            assert app.size.height - (wrap.region.y + wrap.region.height) == 1
+            hit = await pilot.click("#prompt-wrap", offset=(3, 0))
+            await pilot.pause()
+            assert hit, app.get_widget_at(*wrap.region.offset)
+            assert app.focused.id == "prompt", app.focused
+            await pilot.click("#prompt-mark")
+            await pilot.pause()
+            assert app.focused.id == "prompt"
+
+    asyncio.run(_run())
+
+
 def test_clip_thought_uses_ellipsis():
     short = "let me think"
     assert _clip_thought(short) == short
@@ -815,3 +838,62 @@ def test_clip_thought_uses_ellipsis():
     assert shown.endswith("...")
     assert "line 19" not in shown
     assert "line 0" in shown
+
+
+def test_busy_submit_queues_until_send_now_or_turn_ends():
+    async def _run() -> None:
+        from textual.widgets import Input
+
+        from agent_loop.cli.tui import QueueAction, QueuedMessage, UserBanner
+
+        app = SparkTui("queue-msg", "/tmp/spark-agent-tui-queue")
+        async with app.run_test(size=(90, 24)) as pilot:
+            app._start_turn("需要")
+            app._busy = True
+            prompt = app.query_one("#prompt", Input)
+            prompt.value = "今天北京天气咋样"
+            await app.on_input_submitted(Input.Submitted(prompt, prompt.value))
+            await pilot.pause()
+            row = app.query_one(QueuedMessage)
+            assert "#1" in str(row.query_one(".q-text").content)
+            assert "今天北京天气咋样" in str(row.query_one(".q-text").content)
+            assert [act.action for act in row.query(QueueAction)] == ["send", "edit", "cancel"]
+            assert app.loop.inbox.drain_steer() == []
+            assert len(app.loop.inbox._follow_up) == 1
+            banners = [str(b.content) for b in app.query(UserBanner)]
+            assert banners.count("›  今天北京天气咋样") == 0
+
+            app.send_queued_now(row.qid)
+            await pilot.pause()
+            assert list(app.query(QueuedMessage)) == []
+            assert app.loop.inbox.drain_follow_up() == []
+            steered = app.loop.inbox.drain_steer()
+            assert steered and steered[0][0] == "今天北京天气咋样"
+            banners = [str(b.content) for b in app.query(UserBanner)]
+            assert banners.count("›  今天北京天气咋样") == 1
+            app._handle_event({"kind": "user", "text": "今天北京天气咋样"})
+            await pilot.pause()
+            banners = [str(b.content) for b in app.query(UserBanner)]
+            assert banners.count("›  今天北京天气咋样") == 1
+
+            app._busy = True
+            prompt.value = "再问一句"
+            await app.on_input_submitted(Input.Submitted(prompt, prompt.value))
+            await pilot.pause()
+            queued = app.query_one(QueuedMessage)
+            app.edit_queued(queued.qid)
+            await pilot.pause()
+            assert list(app.query(QueuedMessage)) == []
+            assert app.query_one("#prompt", Input).value == "再问一句"
+            assert app.loop.inbox.drain_follow_up() == []
+
+            prompt.value = "丢掉"
+            await app.on_input_submitted(Input.Submitted(prompt, prompt.value))
+            await pilot.pause()
+            queued = app.query_one(QueuedMessage)
+            app.cancel_queued(queued.qid)
+            await pilot.pause()
+            assert list(app.query(QueuedMessage)) == []
+            assert app.loop.inbox.drain_follow_up() == []
+
+    asyncio.run(_run())

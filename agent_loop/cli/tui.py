@@ -24,7 +24,7 @@ from textual.app import App, ComposeResult
 from textual.actions import SkipAction
 from textual.binding import Binding
 from pygments.token import Token
-from textual.containers import Horizontal, VerticalGroup, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalGroup, VerticalScroll
 from textual.markup import escape as markup_escape
 from textual.selection import Selection
 from textual.visual import RenderOptions
@@ -441,6 +441,77 @@ class UserBanner(Static):
         margin-bottom: 1;
     }
     """
+
+
+class QueueAction(Static):
+    """排队条上的 Send now / edit / cancel。"""
+
+    def __init__(self, action: str, label: str) -> None:
+        super().__init__(label, markup=False)
+        self.action = action
+
+    def on_click(self) -> None:
+        row = self.parent
+        qid = getattr(row, "qid", "")
+        send = getattr(self.app, "send_queued_now", None)
+        edit = getattr(self.app, "edit_queued", None)
+        cancel = getattr(self.app, "cancel_queued", None)
+        if self.action == "send" and callable(send):
+            send(qid)
+        elif self.action == "edit" and callable(edit):
+            edit(qid)
+        elif self.action == "cancel" and callable(cancel):
+            cancel(qid)
+
+
+class QueuedMessage(Horizontal):
+    """当前回合还在跑时先排着的下一句。"""
+
+    DEFAULT_CSS = """
+    QueuedMessage {
+        height: 1;
+        width: 100%;
+        background: #dedede;
+        color: #262626;
+        padding: 0 2;
+    }
+    QueuedMessage .q-text {
+        width: 1fr;
+        height: 1;
+        content-align: left middle;
+    }
+    QueuedMessage QueueAction {
+        width: auto;
+        height: 1;
+        color: #2F64D2;
+        content-align: right middle;
+        padding: 0 0 0 1;
+    }
+    """
+
+    def __init__(self, qid: str, text: str, index: int, media: Optional[List[Dict]] = None) -> None:
+        super().__init__()
+        self.qid = qid
+        self._text = text
+        self._media = list(media or [])
+        self._index = index
+
+    def compose(self) -> ComposeResult:
+        yield Static("", classes="q-text", markup=False)
+        yield QueueAction("send", "[Send now]")
+        yield QueueAction("edit", "[edit]")
+        yield QueueAction("cancel", "[cancel]")
+
+    def on_mount(self) -> None:
+        self.set_index(self._index)
+
+    def set_index(self, index: int) -> None:
+        self._index = index
+        shown = " ".join((self._text or "").split())
+        try:
+            self.query_one(".q-text", Static).update(f"#{index}  {shown}")
+        except Exception:
+            pass
 
 
 class TimelineRow(Static):
@@ -1417,6 +1488,9 @@ class SparkTui(App):
     #timeline TimelineRow.muted {
         height: auto;
     }
+    #timeline TimelineRow.finish {
+        margin-bottom: 1;
+    }
     #timeline ThoughtBody {
         height: auto;
         margin: 0 2 1 2;
@@ -1438,10 +1512,25 @@ class SparkTui(App):
     }
     #timeline DiffLine.add { background: #daf2dc; }
     #timeline DiffLine.del { background: #f5dade; }
-    #prompt-wrap {
+    #queue {
+        height: auto;
+        width: 100%;
+        background: #f5f5f5;
+        display: none;
+    }
+    #queue.-open {
+        display: block;
+    }
+    #prompt-dock {
         dock: bottom;
+        height: auto;
+        padding: 0 2 1 2;
+        background: #f5f5f5;
+    }
+    #prompt-wrap {
         height: 3;
-        margin: 0 1;
+        width: 100%;
+        margin: 0;
         padding: 0 1;
         background: #f5f5f5;
         border: round #c7c7cc;
@@ -1531,15 +1620,29 @@ class SparkTui(App):
         self._resume_from_id = ""
         self._draft_images: List[Dict] = []
         self._attaching_drop = False
+        self._queue_rows: Dict[str, QueuedMessage] = {}
+        self._banner_shown: List[str] = []
         self._stdio_log_handlers: List = []
 
     def compose(self) -> ComposeResult:
         yield Static("", id="chrome")
         yield Timeline(id="timeline")
+        yield Vertical(id="queue")
         yield SlashMenu()
-        with Horizontal(id="prompt-wrap"):
-            yield Static("›", id="prompt-mark")
-            yield PromptInput(placeholder="Message or /help", id="prompt", compact=True)
+        with Vertical(id="prompt-dock"):
+            with Horizontal(id="prompt-wrap"):
+                yield Static("›", id="prompt-mark")
+                yield PromptInput(placeholder="Message or /help", id="prompt", compact=True)
+
+    def on_click(self, event) -> None:
+        widget = event.widget
+        while widget is not None and widget is not self:
+            if widget.id == "prompt":
+                return
+            if widget.id in {"prompt-wrap", "prompt-dock"}:
+                self.query_one("#prompt", Input).focus()
+                return
+            widget = widget.parent
 
     def _chat_dir(self):
         return session_log_path_for(self.workspace, self.session_id).parent
@@ -1780,6 +1883,10 @@ class SparkTui(App):
             if text == self._pending_user:
                 self._pending_user = None
                 return
+            if text in self._banner_shown:
+                self._banner_shown.remove(text)
+                return
+            self._remove_queue_by_text(text)
             self._start_turn(text)
         elif kind == "assistant_delta":
             channel = str(event.get("channel") or "content")
@@ -2001,9 +2108,7 @@ class SparkTui(App):
             return
         media = self._take_submit_media(text)
         if self._busy:
-            self.loop.inbox.push_steer(text, media)
-            if self._turn is not None:
-                self._turn.mount(UserBanner(f"›  {text}"))
+            self._enqueue(text, media)
             return
         self._busy = True
         self._aborting = False
@@ -2011,6 +2116,90 @@ class SparkTui(App):
         self._pending_user = text
         self._start_turn(text)
         self.run_worker(self._run_turn(text, media), exclusive=True, group="turn")
+
+    def _queue_box(self) -> Vertical:
+        return self.query_one("#queue", Vertical)
+
+    def _sync_queue_box(self) -> None:
+        box = self._queue_box()
+        box.set_class(bool(self._queue_rows), "-open")
+
+    def _renumber_queue(self) -> None:
+        for index, row in enumerate(self._queue_rows.values(), start=1):
+            row.set_index(index)
+
+    def _drop_queue_row(self, qid: str) -> None:
+        row = self._queue_rows.pop(qid, None)
+        if row is not None and row.is_attached:
+            row.remove()
+        self._renumber_queue()
+        self._sync_queue_box()
+
+    def _remove_queue_by_text(self, text: str) -> None:
+        for qid, row in list(self._queue_rows.items()):
+            if row._text == text:
+                self._drop_queue_row(qid)
+                return
+
+    def _enqueue(self, text: str, media: Optional[List[Dict]] = None) -> None:
+        qid = self.loop.inbox.push_follow_up(text, media)
+        if not qid:
+            return
+        row = QueuedMessage(qid, text, len(self._queue_rows) + 1, media)
+        self._queue_rows[qid] = row
+        self._queue_box().mount(row)
+        self._sync_queue_box()
+        self._scroll_follow()
+
+    def send_queued_now(self, qid: str) -> None:
+        row = self._queue_rows.get(qid)
+        if row is None:
+            return
+        taken = self.loop.inbox.take_follow_up(qid)
+        if taken is None:
+            return
+        text, media = taken
+        self._drop_queue_row(qid)
+        if self._busy and self._turn is not None:
+            self.loop.inbox.push_steer(text, media)
+            self._turn.mount(UserBanner(f"›  {text}"))
+            self._banner_shown.append(text)
+            self._scroll_follow()
+            return
+        self._busy = True
+        self._aborting = False
+        self._busy_t0 = time.monotonic()
+        self._pending_user = text
+        self._start_turn(text)
+        self.run_worker(self._run_turn(text, media), exclusive=True, group="turn")
+
+    def edit_queued(self, qid: str) -> None:
+        row = self._queue_rows.get(qid)
+        if row is None:
+            return
+        if self.loop.inbox.take_follow_up(qid) is None:
+            return
+        text = row._text
+        media = list(row._media)
+        self._drop_queue_row(qid)
+        prompt = self.query_one("#prompt", Input)
+        prompt.value = text
+        prompt.cursor_position = len(text)
+        self._draft_images = []
+        numbers = placeholders_in_text(text)
+        for number, item in zip(numbers, media):
+            self._draft_images.append(
+                {
+                    "n": number,
+                    "path": item.get("path") or "",
+                    "mime": item.get("mime") or "image/png",
+                }
+            )
+        prompt.focus()
+
+    def cancel_queued(self, qid: str) -> None:
+        self.loop.inbox.cancel_follow_up(qid)
+        self._drop_queue_row(qid)
 
     async def _run_command(self, cmd: str, raw: str = "") -> None:
         arg = raw.split(None, 1)[1].strip() if len(raw.split(None, 1)) > 1 else ""
@@ -2176,6 +2365,14 @@ class SparkTui(App):
         self._resume_from_id = ""
         self._draft_images = []
         self._attaching_drop = False
+        self._queue_rows = {}
+        self._banner_shown = []
+        try:
+            queue = self.query_one("#queue", Vertical)
+            await queue.remove_children()
+            queue.remove_class("-open")
+        except Exception:
+            pass
         timeline = self._timeline()
         await timeline.remove_children()
         if replay:
@@ -2258,7 +2455,7 @@ class SparkTui(App):
         turn = self._turn
         if turn is not None and turn.is_attached and self.is_running:
             try:
-                turn.mount(TimelineRow(_muted(text), classes="muted"))
+                turn.mount(TimelineRow(_muted(text), classes="muted finish"))
                 self._scroll_follow()
             except Exception:
                 logging.debug("skip finish line; timeline already gone", exc_info=True)

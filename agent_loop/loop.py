@@ -307,8 +307,8 @@ class ReactAgentLoop(AgentLoop):
             follow = self.inbox.drain_follow_up()
             if not follow:
                 return final_text
-            for text in follow:
-                self.inbox.push_steer(text)
+            for text, media in follow:
+                self.inbox.push_steer(text, media)
 
     def _append_user(self, text: str, media: Any = None) -> None:
         fields: Dict[str, Any] = {"content": text}

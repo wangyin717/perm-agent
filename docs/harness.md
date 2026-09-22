@@ -81,7 +81,7 @@ yaml 行为稿
 
 不会在 `execute` 半截插入。崩溃恢复后若是 `continue_llm`（差最终回复），这次 HTTP 的新 user **走插队**，不再丢掉（例如「用英文回复」下一枪 LLM 能看见）。
 
-「请继续」更像 follow_up；「请继续，用英文」更像 steer。
+「请继续」更像 follow_up；「请继续，用英文」更像 steer。TUI 在回合还在跑时，新的一句默认进 follow_up，输入框上方留一条 `#1 … [Send now][edit][cancel]`。Send now 把它改成 steer；edit 拿回输入框；cancel 丢掉。
 
 end_turn 之后才进的 steer 当成**新回合**：先按 60% 做压缩，再注入。
 

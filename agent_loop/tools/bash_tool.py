@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import subprocess
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
+
+from agent_loop.paths import spark_home
 
 _GUI_IN_CMD = re.compile(
     r"\btkinter\.Tk\s*\(|\btk\.Tk\s*\(|\bTk\s*\(|pygame\.display",
@@ -86,12 +89,20 @@ async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_di
     return await run_bash(cmd, sandbox, session_dir=session_dir, workspace=workspace)
 
 
+def _bash_env() -> dict:
+    env = os.environ.copy()
+    home_bin = str(spark_home() / "bin")
+    env["PATH"] = home_bin + os.pathsep + env.get("PATH", "")
+    return env
+
+
 def _local_run(cmd: str, timeout: float = 120):
     completed = subprocess.run(
         ["bash", "-lc", cmd],
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=_bash_env(),
     )
     return SimpleNamespace(
         stdout=completed.stdout or "",

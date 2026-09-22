@@ -41,6 +41,21 @@ def test_replay_and_read_only():
     assert _lock_path(TOOLS["web_fetch"], {"url": "https://example.com"}, ".") is None
 
 
+def test_bash_schema_forbids_launching_chrome():
+    import json
+
+    path = Path(__file__).resolve().parents[1] / "agent_loop" / "tools" / "tool_schemas.json"
+    schemas = json.loads(path.read_text(encoding="utf-8"))
+    desc = ""
+    for item in schemas:
+        if item.get("function", {}).get("name") == "bash":
+            desc = item["function"]["description"]
+            break
+    assert "browser_exec" in desc
+    assert "--user-data-dir" in desc
+    assert "Application Support/Google/Chrome" in desc
+
+
 def test_schema_tells_model_not_to_bash_or_json_load():
     import json
 

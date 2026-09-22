@@ -55,11 +55,21 @@ class ToolRuntime:
         self._log: Optional[SessionLog] = None
         self.workspace: Optional[str] = None
         self.session_dir: Optional[str] = None
+        self.plugin_host = None
         self._read_snaps: Dict[str, _ReadSnap] = {}
 
     def attach_log(self, log: Optional[SessionLog]) -> None:
         self._log = log
         self.session_dir = str(Path(log.path).parent) if log is not None else None
+
+    def _resolve_tool(self, name: str):
+        tool = get_tool(name)
+        if tool is not None:
+            return tool
+        host = getattr(self, "plugin_host", None)
+        if host is not None:
+            return host.get_tool(name)
+        return None
 
     async def call_tool(self, tool_call: Dict[str, Any], sandbox=None) -> ToolResultEntry:
         """一次工具调用的完整流水线。recover 仍走这条单次入口。"""
@@ -76,7 +86,7 @@ class ToolRuntime:
         name = (tool_call.get("function") or {}).get("name") or ""
         args = _parse_args(tool_call)
 
-        tool = get_tool(name)
+        tool = self._resolve_tool(name)
         if tool is None:
             return PreparedCall(
                 tool_call=tool_call,

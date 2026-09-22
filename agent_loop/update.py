@@ -69,12 +69,59 @@ def newer_than(current: Optional[str], latest: Optional[str]) -> bool:
     return b > a
 
 
+def migrate_uv_tools_dir(home: Optional[Path] = None) -> Path:
+    """旧目录 ~/.permanent/tools 迁到 uv-tools，避免和模型工具表撞名。"""
+    root = spark_home(home)
+    dest = root / "uv-tools"
+    old = root / "tools"
+    if not dest.exists() and old.is_dir():
+        old.rename(dest)
+    if dest.is_dir():
+        _rewrite_uv_tools_paths(old, dest, root)
+    return dest
+
+
+def _rewrite_uv_tools_paths(old: Path, dest: Path, root: Path) -> None:
+    old_s, new_s = str(old), str(dest)
+    if old_s != new_s:
+        for path in dest.rglob("*"):
+            if not path.is_file() or path.is_symlink():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if old_s in text:
+                path.write_text(text.replace(old_s, new_s), encoding="utf-8")
+    bindir = root / "bin"
+    if not bindir.is_dir():
+        return
+    for link in bindir.iterdir():
+        if not link.is_symlink():
+            continue
+        target = os.readlink(link)
+        if old_s in target:
+            link.unlink()
+            link.symlink_to(target.replace(old_s, new_s, 1))
+
+
+def _uv_env(home: Optional[Path] = None) -> dict:
+    root = spark_home(home)
+    dest = migrate_uv_tools_dir(home)
+    env = os.environ.copy()
+    env["UV_TOOL_DIR"] = str(dest)
+    env["UV_TOOL_BIN_DIR"] = str(root / "bin")
+    env["UV_PYTHON_INSTALL_DIR"] = str(root / "python")
+    return env
+
+
 def _run(
     argv: Sequence[str],
     *,
     cwd: Optional[Path] = None,
     timeout: float = 30,
     check: bool = False,
+    env: Optional[dict] = None,
 ) -> subprocess.CompletedProcess:
     return subprocess.run(
         list(argv),
@@ -83,6 +130,7 @@ def _run(
         capture_output=True,
         timeout=timeout,
         check=check,
+        env=env,
     )
 
 
@@ -142,12 +190,17 @@ def peek_update(*, home: Optional[Path] = None, timeout: float = 2.5) -> Optiona
 
 def write_wrappers(home: Optional[Path] = None) -> None:
     root = spark_home(home)
+    migrate_uv_tools_dir(home)
     perm = root / "src" / ".venv" / "bin" / "perm"
     bindir = Path.home() / ".local" / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     body = (
         "#!/bin/sh\n"
         f'export PERMANENT_HOME="{root}"\n'
+        f'export PATH="{root / "bin"}:$PATH"\n'
+        f'export UV_TOOL_DIR="{root / "uv-tools"}"\n'
+        f'export UV_TOOL_BIN_DIR="{root / "bin"}"\n'
+        f'export UV_PYTHON_INSTALL_DIR="{root / "python"}"\n'
         f'exec "{perm}" "$@"\n'
     )
     for name in ("perm", "permanent"):
@@ -193,5 +246,43 @@ def run_update(ref: Optional[str] = None, *, home: Optional[Path] = None) -> int
         print(sync.stderr or sync.stdout or "uv sync failed", file=sys.stderr)
         return 1
     write_wrappers(root)
+    from agent_loop.plugins.pack import ensure_user_plugins
+    from agent_loop.prompt.skills import ensure_user_skills
+
+    ensure_user_plugins(root)
+    ensure_user_skills(root)
+    _ensure_browser_use_cli(uv, root)
     print(f"updated to {target}")
     return 0
+
+
+def _ensure_browser_use_cli(uv: Path, home: Optional[Path] = None) -> None:
+    env = _uv_env(home)
+    root = spark_home(home)
+    migrate_uv_tools_dir(home)
+    (root / "uv-tools").mkdir(parents=True, exist_ok=True)
+    (root / "python").mkdir(parents=True, exist_ok=True)
+    (root / "bin").mkdir(parents=True, exist_ok=True)
+    _run([str(uv), "python", "install", "3.12"], timeout=120, env=env)
+    proc = _run(
+        [str(uv), "tool", "install", "--python", "3.12", "--upgrade", "browser-use"],
+        timeout=180,
+        env=env,
+    )
+    if proc.returncode != 0:
+        print(
+            "browser-use CLI skipped; "
+            f"{uv} tool install --python 3.12 browser-use",
+            file=sys.stderr,
+        )
+        return
+    shim = root / "bin" / "browser-use"
+    link = Path.home() / ".local" / "bin" / "browser-use"
+    if shim.is_file():
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            link.symlink_to(shim)
+        except OSError:
+            pass

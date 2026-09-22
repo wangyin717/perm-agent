@@ -6,6 +6,8 @@
   memory/YYYY-MM-DD-slug-{sessionId}.md
   chats/{sessionId}/session.jsonl
   chats/{sessionId}/title.json
+  chats/{sessionId}/permanent.log
+  chats/{sessionId}/browser-use-mcp.log
   chats/{sessionId}/workspace/tools_result/…
 """
 

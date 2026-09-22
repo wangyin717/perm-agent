@@ -12,9 +12,14 @@ def test_includes_persona_cwd_and_date(tmp_path):
     assert "# Tool notes" in text
     assert "Prefer specialized tools over" in text
     assert "Do not use bash to read" in text
+    assert "browser_exec" in text
     assert "mdfind -name" in text
     assert "Never `find $HOME`" in text
     assert "memory_search" in text
+    assert "# Skills" in text
+    assert "browser-use" in text
+    assert "/plugins/browser-use/SKILL.md" in text
+    assert "read that SKILL.md" in text
     assert "short markdown table" in text
     assert "offset" not in text  # 工具参数留给 schema
     assert f"Current working directory: {tmp_path.resolve().as_posix()}" in text

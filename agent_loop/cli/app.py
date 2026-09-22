@@ -22,14 +22,24 @@ class CliDeps:
 
 
 async def _amain(query: str, session_id: str) -> str:
-    loop = ReactAgentLoop(CliDeps(), None, None)
+    from agent_loop.plugins import PluginHost
+
+    host = PluginHost()
+    loop = ReactAgentLoop(CliDeps(), None, host)
     user_action_data = {
         "sessionId": session_id,
         "workspace": os.getcwd(),
     }
     log_path = session_log_path_for(os.getcwd(), session_id)
     log_session(session_id, str(log_path))
-    return await loop._run_loop(query, user_action_data)
+    from agent_loop.file_logging import configure_file_logging
+
+    configure_file_logging(log_path.parent)
+    host.set_session_dir(log_path.parent)
+    try:
+        return await loop._run_loop(query, user_action_data)
+    finally:
+        await host.stop()
 
 
 def _run_update_cli(argv: list[str]) -> int:
@@ -64,11 +74,6 @@ def main() -> None:
     )
     parser.add_argument("query", nargs="*", help="用户问题；省略则进入 TUI")
     args = parser.parse_args()
-    logging.basicConfig(
-        level=logging.WARNING,
-        format="%(asctime)s  %(message)s",
-        datefmt="%H:%M:%S",
-    )
     session_id = args.session or datetime.now().strftime("cli-%Y%m%d-%H%M%S")
     query = " ".join(args.query).strip()
     if args.tui or not query:
@@ -76,6 +81,11 @@ def main() -> None:
 
         run_tui(args.session)
         return
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
     notice = peek_update()
     if notice:
         print(notice, file=sys.stderr)

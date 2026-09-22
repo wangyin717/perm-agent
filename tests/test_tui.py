@@ -3,9 +3,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
+from pathlib import Path
 
-from agent_loop.cli.tui import PromptInput, SparkTui, TimelineRow, matching_slash, slash_prefix
+from agent_loop.cli.tui import (
+    PromptInput,
+    SparkTui,
+    ThoughtBody,
+    TimelineRow,
+    WaitingMark,
+    WaitingNotice,
+    _clip_thought,
+    matching_slash,
+    slash_prefix,
+)
 
 
 def _status(app: SparkTui) -> str:
@@ -30,12 +42,22 @@ async def _run() -> None:
         app._handle_event(
             {"kind": "assistant_delta", "text": "let me think", "channel": "reasoning"}
         )
+        app._handle_event(
+            {
+                "kind": "assistant_delta",
+                "text": " and keep the rest of this sentence",
+                "channel": "reasoning",
+            }
+        )
         await pilot.pause()
         live = _thoughts(app)
         assert len(live) == 1, live
         assert "Thinking" in live[0]
         assert "Thought" not in live[0]
         assert "Waiting" not in _status(app), _status(app)
+        bodies = list(app.query(ThoughtBody))
+        assert len(bodies) == 1
+        assert bodies[0]._src.startswith("let me think")
 
         app._handle_event({"kind": "assistant_delta", "text": "hello", "channel": "content"})
         await pilot.pause()
@@ -43,6 +65,9 @@ async def _run() -> None:
         assert len(done) == 1
         assert "Thought" in done[0]
         assert "for" in done[0]
+        bodies = list(app.query(ThoughtBody))
+        assert len(bodies) == 1
+        assert "keep the rest of this sentence" in bodies[0]._src
 
         app._handle_event({"kind": "tools", "tool_calls": [{"name": "read"}]})
         app._handle_event({"kind": "tool_start", "name": "read", "args": {"path": "a.py"}})
@@ -83,6 +108,19 @@ def test_markdown_as_text_cache_returns_copy():
     assert len(tui_mod._MD_CACHE) == 1
 
 
+def test_file_logging_writes_under_permanent_home(tmp_path, monkeypatch):
+    from agent_loop.file_logging import configure_file_logging
+
+    monkeypatch.setenv("PERMANENT_HOME", str(tmp_path))
+    path = configure_file_logging(tmp_path)
+    assert path == tmp_path / "permanent.log"
+    logging.getLogger("agent_loop.test").info("hello-file-log")
+    for handler in logging.getLogger().handlers:
+        if getattr(handler, "_permanent_file_log", False):
+            handler.flush()
+    assert "hello-file-log" in path.read_text(encoding="utf-8")
+
+
 def test_quiet_stdio_logging_hides_warnings(capsys):
     from agent_loop.cli.tui import _quiet_stdio_logging, _restore_stdio_logging
 
@@ -104,6 +142,23 @@ def test_quiet_stdio_logging_hides_warnings(capsys):
         assert "visible-after" in capsys.readouterr().err
     finally:
         logger.removeHandler(handler)
+
+
+def test_quiet_stdio_logging_drops_detached_stderr(capsys):
+    from agent_loop.cli.tui import _quiet_stdio_logging, _restore_stdio_logging
+
+    logger = logging.getLogger()
+    stale = logging.StreamHandler(stream=open("/dev/null", "w"))
+    stale.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(stale)
+    try:
+        saved = _quiet_stdio_logging()
+        assert stale in saved
+        assert stale not in logger.handlers
+    finally:
+        _restore_stdio_logging([])
+        logger.removeHandler(stale)
+        stale.close()
 
 
 def test_brief_exc_keeps_one_line():
@@ -130,7 +185,7 @@ def test_matching_slash_prefix():
     assert slash_prefix("/resume 1") is None
     assert slash_prefix("/") == "/"
     names = [item[0] for item in matching_slash("/")]
-    assert "/help" in names and "/new" in names
+    assert "/help" in names and "/new" in names and "/copy" in names
     assert [item[0] for item in matching_slash("/re")] == ["/resume", "/rename"]
     assert matching_slash("/zzz") == []
 
@@ -548,3 +603,231 @@ async def _copy_prose() -> None:
 
 def test_prose_can_copy_selection():
     asyncio.run(_copy_prose())
+
+
+async def _copy_thought() -> None:
+    from textual.events import MouseDown, MouseMove, MouseUp
+
+    app = SparkTui("copy-thought", "/tmp/spark-agent-tui-copy-thought")
+    async with app.run_test(size=(80, 24)) as pilot:
+        app._start_turn("q")
+        app._handle_event(
+            {
+                "kind": "assistant_delta",
+                "text": "Chrome 已经连上，而且有一个已登录的 Gmail 标签。",
+                "channel": "reasoning",
+            }
+        )
+        app._handle_event({"kind": "assistant_delta", "text": "ok", "channel": "content"})
+        await pilot.pause()
+        body = app.query_one(ThoughtBody)
+        await pilot._post_mouse_events([MouseMove, MouseDown], widget=body, offset=(1, 0))
+        await pilot._post_mouse_events([MouseMove], widget=body, offset=(10, 0))
+        await pilot._post_mouse_events([MouseUp], widget=body, offset=(10, 0))
+        await pilot.pause()
+        assert "已经连" in (app.clipboard or ""), repr(app.clipboard)
+
+
+def test_thought_body_can_copy_selection():
+    asyncio.run(_copy_thought())
+
+
+def test_copy_command_copies_latest_reply_not_thought():
+    async def _run() -> None:
+        previous = subprocess.check_output(["pbpaste"])
+        app = SparkTui("copy-cmd", "/tmp/spark-agent-tui-copy-cmd")
+        async with app.run_test(size=(80, 24)) as pilot:
+            app._start_turn("q")
+            app._handle_event(
+                {
+                    "kind": "assistant_delta",
+                    "text": "thought should stay",
+                    "channel": "reasoning",
+                }
+            )
+            app._handle_event(
+                {"kind": "assistant", "text": "the reply body"}
+            )
+            await pilot.pause()
+            await app._run_command("copy", "/copy")
+            pasted = subprocess.check_output(["pbpaste"])
+            assert pasted == b"the reply body", pasted
+            assert b"thought should stay" not in pasted
+            rows = [str(w.content) for w in app.query(TimelineRow)]
+            assert any("Copied to clipboard" in row and "14 chars, 1 line" in row for row in rows), rows
+            saved = Path(os.environ["PERMANENT_HOME"]) / "last-copy.txt"
+            assert saved.read_text(encoding="utf-8") == "the reply body"
+        subprocess.run(["pbcopy"], input=previous, check=False)
+
+    import subprocess
+
+    asyncio.run(_run())
+
+
+def test_copy_reaches_macos_pasteboard():
+    async def _run() -> None:
+        previous = subprocess.check_output(["pbpaste"])
+        app = SparkTui("pbcopy-test", "/tmp/spark-agent-tui-pbcopy")
+        async with app.run_test(size=(80, 24)) as pilot:
+            app._start_turn("q")
+            app._handle_event(
+                {
+                    "kind": "assistant_delta",
+                    "text": "思考可以复制",
+                    "channel": "reasoning",
+                }
+            )
+            app._handle_event(
+                {"kind": "assistant_delta", "text": "正文可以复制", "channel": "content"}
+            )
+            await pilot.pause()
+            from textual.events import MouseDown, MouseMove, MouseUp
+
+            body = app.query_one(ThoughtBody)
+            await pilot._post_mouse_events(
+                [MouseMove, MouseDown], widget=body, offset=(0, 0)
+            )
+            await pilot._post_mouse_events([MouseMove], widget=body, offset=(6, 0))
+            await pilot._post_mouse_events([MouseUp], widget=body, offset=(6, 0))
+            await pilot.pause()
+            pasted = subprocess.check_output(["pbpaste"])
+            assert "思考".encode() in pasted, pasted
+            prose = app.query_one(Prose)
+            prose.text_select_all()
+            await pilot.pause()
+            app.copy_to_clipboard(app.screen.get_selected_text() or "")
+            pasted = subprocess.check_output(["pbpaste"])
+            assert "正文可以复制".encode() in pasted, pasted
+        subprocess.run(["pbcopy"], input=previous, check=False)
+
+    import subprocess
+
+    from agent_loop.cli.tui import Prose
+
+    asyncio.run(_run())
+
+
+def test_browser_exec_diamond_blinks_and_counts_seconds():
+    async def _run() -> None:
+        app = SparkTui("run-tool", "/tmp/spark-agent-tui-run-tool")
+        async with app.run_test(size=(100, 24)) as pilot:
+            app._start_turn("q")
+            app._handle_event(
+                {
+                    "kind": "tool_start",
+                    "name": "browser_exec",
+                    "args": {"code": "print(page_info())"},
+                }
+            )
+            await pilot.pause()
+            from agent_loop.cli.tui import RunningToolRow
+
+            row = app.query_one(RunningToolRow)
+            mark = row.query_one(WaitingMark)
+            assert mark._timer is not None
+            assert mark._hollow is True
+            text = str(row.query_one(".run-text").content)
+            assert "browser_exec" in text
+            assert "page_info" in text
+            assert "0s" in text, text
+            first = mark._on
+            await pilot.pause(0.5)
+            assert mark._on is not first
+            row._t0 = time.monotonic() - 65
+            await pilot.pause(0.6)
+            text = str(row.query_one(".run-text").content)
+            assert "1m5s" in text, text
+            app._handle_event({"kind": "tool_result", "name": "browser_exec", "is_error": False})
+            await pilot.pause()
+            assert mark._timer is None
+            assert mark._frozen is True
+            text = str(row.query_one(".run-text").content)
+            assert "1m5s" in text, text
+            held = mark._on
+            await pilot.pause(0.5)
+            assert mark._on is held
+            assert "◇" not in str(mark.render())
+
+    asyncio.run(_run())
+
+
+def test_fast_tool_drops_zero_seconds_when_done():
+    async def _run() -> None:
+        app = SparkTui("fast-tool", "/tmp/spark-agent-tui-fast-tool")
+        async with app.run_test(size=(80, 24)) as pilot:
+            app._start_turn("q")
+            app._handle_event({"kind": "tool_start", "name": "read", "args": {"path": "a.py"}})
+            await pilot.pause()
+            from agent_loop.cli.tui import RunningToolRow
+
+            row = app.query_one(RunningToolRow)
+            assert "0s" in str(row.query_one(".run-text").content)
+            app._handle_event({"kind": "tool_result", "name": "read", "is_error": False})
+            await pilot.pause()
+            text = str(row.query_one(".run-text").content)
+            assert "Read" in text and "a.py" in text
+            assert "0s" not in text, text
+            assert row.query_one(WaitingMark)._timer is None
+
+    asyncio.run(_run())
+
+
+def test_empty_flash_thought_drops_and_next_thought_stays_separate():
+    async def _run() -> None:
+        app = SparkTui("thought-split", "/tmp/spark-agent-tui-thought-split")
+        async with app.run_test(size=(100, 30)) as pilot:
+            app._start_turn("q")
+            app._handle_event({"kind": "assistant_delta", "text": "   ", "channel": "reasoning"})
+            await pilot.pause()
+            assert _thoughts(app), _thoughts(app)
+            app._handle_event({"kind": "tool_start", "name": "read", "args": {"path": "a.py"}})
+            await pilot.pause()
+            assert _thoughts(app) == [], _thoughts(app)
+            assert list(app.query(ThoughtBody)) == []
+            app._handle_event({"kind": "tool_result", "name": "read", "is_error": False})
+            app._handle_event(
+                {"kind": "assistant_delta", "text": "first real thought", "channel": "reasoning"}
+            )
+            app._handle_event({"kind": "assistant_delta", "text": "ok", "channel": "content"})
+            await pilot.pause()
+            app._handle_event(
+                {"kind": "assistant_delta", "text": "second thought", "channel": "reasoning"}
+            )
+            app._handle_event({"kind": "assistant", "text": "done"})
+            await pilot.pause()
+            bodies = [body._src for body in app.query(ThoughtBody)]
+            assert bodies == ["first real thought", "second thought"], bodies
+            assert len(_thoughts(app)) == 2
+
+    asyncio.run(_run())
+
+
+def test_waiting_notice_diamond_blinks_until_tool_returns():
+    async def _run() -> None:
+        app = SparkTui("wait-notice", "/tmp/spark-agent-tui-wait")
+        async with app.run_test(size=(80, 24)) as pilot:
+            app._start_turn("q")
+            app._handle_event({"kind": "notice", "text": "请点 Allow"})
+            await pilot.pause()
+            row = app.query_one(WaitingNotice)
+            mark = row.query_one(WaitingMark)
+            assert mark._timer is not None
+            first = mark._on
+            await pilot.pause(0.5)
+            assert mark._on is not first
+            app._handle_event({"kind": "tool_result", "name": "browser_exec", "is_error": False})
+            await pilot.pause()
+            assert mark._timer is None
+            assert mark._on is True
+
+    asyncio.run(_run())
+
+
+def test_clip_thought_uses_ellipsis():
+    short = "let me think"
+    assert _clip_thought(short) == short
+    long_lines = "\n".join(f"line {i} " + ("x" * 40) for i in range(20))
+    shown = _clip_thought(long_lines)
+    assert shown.endswith("...")
+    assert "line 19" not in shown
+    assert "line 0" in shown

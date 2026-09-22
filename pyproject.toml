@@ -1,6 +1,6 @@
 [project]
 name = "agent-loop"
-version = "0.1.0"
+version = "0.3.0"
 description = "Standalone ReAct agent loop (extracted from SwiftAgent)"
 requires-python = ">=3.10"
 dependencies = [
@@ -26,7 +26,7 @@ build-backend = "setuptools.build_meta"
 include = ["agent_loop*"]
 
 [tool.setuptools.package-data]
-agent_loop = ["prompt/*.yaml", "tools/*.json"]
+agent_loop = ["prompt/*.yaml", "tools/*.json", "plugins/*/SKILL.md", "plugins/*/plugin.json"]
 
 [dependency-groups]
 dev = [

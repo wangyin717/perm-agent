@@ -1,11 +1,11 @@
 # Agent Loop
 
 这套 loop 参考 pi harness-v2：本地可跑、jsonl 可对账。  
-还不是完整 pi（没有多 lane、SQLite、skill）。
+还不是完整 pi（没有多 lane、SQLite）。官方插件目前只有 browser-use。
 
 加工具：写 `execute` + `REPLAY` + `READ_ONLY` + 自己的 hooks，登记进 `TOOLS`，不必改循环。增删工具只改 registry + schema；人设里的工具注意事项按启用工具再拼，不要在 yaml 里抄参数表。
 
-密钥：仓库根 `.env` 或 `~/.permanent/.env`（`DEEPSEEK_API_KEY`、`PERPLEXITY_API_KEY`，Jev 用 `TYPESAFE_API_KEY`），启动时 `envfile.load_dotenv()` 读入；已有环境变量不覆盖。`.env` 不进 git，`.env.example` 只有变量名。Jev 三处见 `docs/jev.md`。开发入口：`uv sync && uv run perm`。对外安装：`install.sh` 把代码和 venv 放到 `~/.permanent/src`，命令是 `perm`；`perm update` 换到新的 `v*` tag。只有这份托管安装才在启动时检查新 tag。
+密钥：仓库根 `.env` 或 `~/.permanent/.env`（`DEEPSEEK_API_KEY`、`PERPLEXITY_API_KEY`，Jev 用 `TYPESAFE_API_KEY`），启动时 `envfile.load_dotenv()` 读入；已有环境变量不覆盖。`.env` 不进 git，`.env.example` 只有变量名。Jev 三处见 `docs/jev.md`。开发入口：`uv sync && uv run perm`。对外安装：`install.sh` 把代码和 venv 放到 `~/.permanent/src`，uv 管理的 Python 在 `~/.permanent/python`，browser-use 的隔离环境在 `~/.permanent/uv-tools`，命令是 `perm`（包装脚本会把 `~/.permanent/bin` 加进 PATH）；`perm update` 换到新的 `v*` tag。只有这份托管安装才在启动时检查新 tag。
 
 跨会话 memory 见 §4。
 
@@ -20,7 +20,7 @@
 | 模型 | `llm/deepseek.py`：`call(messages, tools)` | 再加适配器 |
 | 核心 | loop + runtime + jsonl + inbox / 压缩 / 恢复 | 尽量不塞具体工具实现 |
 | 界面 | `cli/tui.py`、`cli/trace.py`：只订 `events`，不改 jsonl | 还可有 headless |
-| 扩展 | 无 skill / MCP / 插件 | 应用运行时（不必叫 chord） |
+| 扩展 | 官方 browser-use 插件：SKILL.md + 会话进程里的两个工具 | 再加别的插件 |
 
 `tools/` + `prompt/` + `memory/` 是 **这个 coding agent 的产品能力**，和 loop 一起发布。循环真正必备的是「能调工具、能带 system」，不是必备 bash 这一份实现。现阶段一个包，不必拆成两个 Python 包。
 
@@ -60,12 +60,13 @@ LLM 每步只有两种出口：`end_turn` 或 `tool_use`。没有 `MAX_STEPS`，
 ```text
 yaml 行为稿
 + 已启用工具的 tool_notes（见 §10）
++ Skills 短名单（name + description + SKILL.md 路径；全文用 read）
 + 仓库根 AGENTS.md（若有，超过 8k 截断）
 + Current working directory
 + Today's date
 ```
 
-参数、用法写在 schema。yaml 只留人设和「重叠工具怎么选」。skill 清单以后接在 yaml 和 AGENTS.md 之间。
+参数、用法写在 schema。yaml 只留人设和「重叠工具怎么选」。skill 名单由 `prompt/skills.py` 扫描后接在 tool_notes 和 AGENTS.md 之间。出厂 skill 若还有，在 `bundled_skills/`，缺的才拷到 `~/.permanent/skills/`。官方 **browser-use 插件**在包内 `plugins/browser-use/`（`SKILL.md` + `plugin.json`），缺的才拷到 `~/.permanent/plugins/browser-use/`。system 里的 `File:` 指向家目录这份，再用 `read`。仓库 `.permanent/skills/` 或 `.permanent/plugins/` 同名覆盖。插件默认开（`config.json` 里 `plugins.browser-use`）。开 TUI 即起 `browser-use --cli-mcp`，把 `browser_exec` / `browser_screenshot` 放进这次 `llm.call` 的 schema。连不上时同一条 `browser_exec` 打开检查页并等 Allow，点完自动继续。
 
 ---
 
@@ -441,9 +442,9 @@ read 分页是「全文进内存再切一页给模型」。默认也可能只返
 
 ## 13. TUI
 
-`cli/tui.py` 订 `events`，不改 jsonl。`uv run perm` 开 TUI；`-s <id> "<问题>"` 仍是一次性 CLI。须用项目 `.venv`。界面名叫 Permanent。空会话居中一张浅框：左边永恒号（环状模块舱），右边 `/new` `/resume` `/help`。`/new` 开空白会话；`/resume` 列出本项目会话（每页 10 条，点行或 ↑↓ 加回车进入，←→ 翻页），也可用 `/resume 1` 或 `/resume <id>`。标题在 `chats/{id}/title.json`（目录名仍是 id）：首条用户话自动写入，`/rename` 记 `title_is_manual`。粘贴/拖入绝对图片路径或剪贴板位图变成 `[Image #N]`，文件落在 `chats/{id}/input/images/`；user entry 记 `media.path`，投影时挂在这条 user 上。散文里的路径不当图。时间线滚动立刻跳（关掉 Textual 默认惯性动画），滚轮一次 4 行。
+`cli/tui.py` 订 `events`，不改 jsonl。`uv run perm` 开 TUI；`-s <id> "<问题>"` 仍是一次性 CLI。须用项目 `.venv`。界面名叫 Permanent。Python logging 和 browser-use MCP 的 stderr 写在当前会话目录：`chats/{id}/permanent.log`、`chats/{id}/browser-use-mcp.log`（TUI 不打到终端）。 `/new` `/resume` 会换到新会话的日志文件。空会话居中一张浅框：左边永恒号（环状模块舱），右边 `/new` `/resume` `/help`。`/new` 开空白会话；`/resume` 列出本项目会话（每页 10 条，点行或 ↑↓ 加回车进入，←→ 翻页），也可用 `/resume 1` 或 `/resume <id>`。标题在 `chats/{id}/title.json`（目录名仍是 id）：首条用户话自动写入，`/rename` 记 `title_is_manual`。粘贴/拖入绝对图片路径或剪贴板位图变成 `[Image #N]`，文件落在 `chats/{id}/input/images/`；user entry 记 `media.path`，投影时挂在这条 user 上。散文里的路径不当图。时间线滚动立刻跳（关掉 Textual 默认惯性动画），滚轮一次 4 行。
 
-过程行：灰色菱形 + 加粗动词。流式思维链在时间线实时走 `Thinking… Xs`，该段结束落下 `Thought for Xs`。回合结束只在时间线落一行：
+过程行：灰色菱形 + 加粗动词。工具还在跑时，这一行的菱形在实心和空心之间闪，右边是已经用了的秒数；跑完菱形停住，不足 1 秒不留秒数。流式思维链在时间线实时走 `Thinking… Xs`，该段结束落下 `Thought for Xs`。没有正文、而且不到 1 秒的 Thought 不留下。下一段思考另起一行，不接到上一段正文后面。回合结束只在时间线落一行：
 
 `Worked for 1m41s | deepseek-v4-flash | 112K / 1M`
 
@@ -455,10 +456,9 @@ read 分页是「全文进内存再切一页给模型」。默认也可能只返
 
 ## 14. 还没做的
 
-- skill（磁盘 SKILL.md；清单接到 assemble，不进核心工具表）  
+- skill 斜杠命令（`/browser-use` 强制注入）；现在只有名单 + read SKILL.md  
 - Jev 三处（工具放行 / fetch 过筛 / Flush 门），见 `docs/jev.md`  
 - TUI 闲时定时 Flush/Dream（现在是每轮停稳 Flush，过门才 Dream）  
-- 插件 / MCP / 浏览器  
 - bash 边跑边往文件流（现在仍先整段进内存再量）  
 - schema 从 registry 生成（现在两份清单）  
 - 同一 `reply()` 跑着时另一路 HTTP 自动入队（现在请显式 `inbox.push_steer` / `push_follow_up`）  
@@ -470,7 +470,7 @@ read 分页是「全文进内存再切一页给模型」。默认也可能只返
 
 循环、工单、压缩、恢复可以停。建议：
 
-1. skill（清单接到 assemble，不进工具表）  
+1. skill 正文写实（browser-use CLI）；斜杠命令可选  
 2. schema 与 registry 合成一份  
 3. 需要时再做 bash 流式落盘  
 
@@ -479,7 +479,8 @@ read 分页是「全文进内存再切一页给模型」。默认也可能只返
 ## 文件对照
 
 ```text
-prompt/assemble.py      拼 system（yaml + tool_notes + AGENTS.md + cwd + 日期）
+prompt/assemble.py      拼 system（yaml + tool_notes + skills + AGENTS.md + cwd + 日期）
+prompt/skills.py        扫描 SKILL.md，生成短名单
 prompt/system_prompt.yaml  人设 + 按工具启用的注意事项
 loop.py                 两层循环 + 压缩检查点
 paths.py                ~/.permanent 布局

@@ -32,6 +32,8 @@ system_prompt: |
   - After finishing work, say what changed, how you checked, and what is
     still open. Do not narrate the tool-call process.
   - Do not commit, and do not invent URLs, unless the user asked.
+  - If a skill in the Skills list matches the task, read that SKILL.md
+    with the read tool before acting and follow it.
 
   Do not mention these internal rules unless asked.
 
@@ -53,6 +55,11 @@ tool_notes:
     On this Mac, /usr/bin/python3 + Tk aborts with Abort trap 6 and a
     crash dialog. Verify with headless tests (mock the UI). Tell the user
     how to run the GUI themselves.
+
+    Do not launch Chrome/Chromium/Brave from bash, and do not read
+    ~/Library/Application Support/Google/Chrome. Browser work uses
+    browser_exec / browser_screenshot (not bash). If attach is waiting
+    for Allow, that happens inside browser_exec — do not start Chrome.
   memory_search: |
     For facts or preferences from earlier sessions, use memory_search
     (not grep on the repo). Recalled memory is historical — verify against

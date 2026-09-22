@@ -1,4 +1,4 @@
-"""拼这一枪发给模型的 system：人设 yaml + 已启用工具的注意事项 + 可选 AGENTS.md + cwd + 日期。"""
+"""拼这一枪发给模型的 system：人设 yaml + tool_notes + skill 名单 + 可选 AGENTS.md + cwd + 日期。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import yaml
+
+from agent_loop.prompt.skills import discover_skills, format_skills_prompt
 
 _YAML = Path(__file__).resolve().parent / "system_prompt.yaml"
 _AGENTS_MAX_CHARS = 8000
@@ -58,6 +60,9 @@ def build_system_prompt(
     notes = _tool_notes_block(enabled_tools)
     if notes:
         parts.append(notes)
+    skills = format_skills_prompt(discover_skills(root))
+    if skills:
+        parts.append(skills)
     agents = _read_agents_md(root)
     if agents:
         parts.append(f"# Project instructions (AGENTS.md)\n\n{agents}")

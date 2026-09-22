@@ -1,0 +1,5 @@
+{
+  "name": "browser-use",
+  "enabled_by_default": true,
+  "mcp": ["browser-use", "--cli-mcp"]
+}

@@ -86,6 +86,7 @@ class ReactAgentLoop(AgentLoop):
         super().__init__(deps, event_emitter, plugin_manager)
         self._llm: Optional[DeepSeekLLM] = None
         self.runtime = ToolRuntime()
+        self.runtime.plugin_host = plugin_manager
         self._log: Optional[SessionLog] = None
         self.inbox = UserInbox()
         self._abort: Optional[Abort] = None
@@ -122,6 +123,8 @@ class ReactAgentLoop(AgentLoop):
         self._log = SessionLog(session_log_path(user_action_data))
         self.runtime.attach_log(self._log)
         self.runtime.workspace = str(user_action_data.get("workspace") or os.getcwd())
+        if self.plugin_manager is not None:
+            await self.plugin_manager.ensure_started()
         # 每次进程启动都可能是接着上次崩溃的现场：先看盘上停在哪一步。
         plan = inspect_log(self._log.read_all())
         if plan.action not in ("idle", "empty"):
@@ -167,6 +170,9 @@ class ReactAgentLoop(AgentLoop):
         )
         abort = Abort()
         self._abort = abort
+        host = self.plugin_manager
+        if host is not None and hasattr(host, "bind_abort"):
+            host.bind_abort(abort)
         stop_listening = (
             _listen_sigint(abort) if user_action_data.get("install_sigint", True) else (lambda: None)
         )
@@ -189,6 +195,8 @@ class ReactAgentLoop(AgentLoop):
             return result
         finally:
             stop_listening()
+            if host is not None and hasattr(host, "bind_abort"):
+                host.bind_abort(None)
             if self._abort is abort:
                 self._abort = None
 
@@ -237,7 +245,7 @@ class ReactAgentLoop(AgentLoop):
                 estimated_tokens = tracker.known_tokens
                 response = await llm.call(
                     messages,
-                    tools=TOOL_SCHEMAS,
+                    tools=self._tool_schemas(),
                     abort=abort,
                     on_delta=lambda text, channel="content": emit_event(
                         "assistant_delta", text=text, channel=channel
@@ -329,6 +337,13 @@ class ReactAgentLoop(AgentLoop):
             messages.append(msg)
             tracker.add_estimate({"role": "user", "content": text})
             log_user(text)
+
+    def _tool_schemas(self) -> list:
+        schemas = list(TOOL_SCHEMAS)
+        host = self.plugin_manager
+        if host is not None:
+            schemas.extend(host.openai_schemas())
+        return schemas
 
     def _begin_llm_step(self) -> str:
         """llm.call 之前盖章。若上次 attempt 没关，复用同一个 assistant id。

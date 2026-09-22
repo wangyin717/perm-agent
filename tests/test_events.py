@@ -32,6 +32,11 @@ def test_format_grok_tool():
     assert "tui.py" in format_grok_tool("read", {"path": "a/tui.py"})
     assert "Search" in format_grok_tool("grep", {"pattern": "TODO"})
     assert "Edit" in format_grok_tool("edit", {"path": "loop.py"})
+    assert (
+        format_grok_tool("browser_exec", {"code": "print(page_info())\nprint(2)"})
+        == "browser_exec  print(page_info())"
+    )
+    assert format_grok_tool("browser_screenshot", {}) == "browser_screenshot"
 
 
 def test_parse_slash():

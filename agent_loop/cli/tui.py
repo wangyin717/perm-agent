@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -26,12 +28,13 @@ from textual.containers import Horizontal, VerticalGroup, VerticalScroll
 from textual.markup import escape as markup_escape
 from textual.selection import Selection
 from textual.visual import RenderOptions
-from textual.events import Paste
+from textual.events import Paste, TextSelected
 from textual.widgets import Input, Static
 
 from agent_loop import events
 from agent_loop.cli.app import CliDeps
 from agent_loop.loop import ReactAgentLoop
+from agent_loop.paths import spark_home
 from agent_loop.tools.diff_view import clip_diff_line
 from agent_loop.paths import list_sessions, session_log_path_for
 from agent_loop.session_title import (
@@ -56,6 +59,7 @@ from agent_loop.prompt_images import (
 
 HELP = """commands:
   /help      this list
+  /copy      copy the latest reply (not the thought)
   /exit      quit (/quit same)
   /new       new session (blank history)
   /resume    list sessions (click a row; n/p or ←/→ to page)
@@ -81,6 +85,8 @@ def parse_slash(text: str) -> Optional[str]:
         return "new"
     if name == "/help":
         return "help"
+    if name == "/copy":
+        return "copy"
     if name == "/session":
         return "session"
     if name == "/resume":
@@ -92,6 +98,7 @@ def parse_slash(text: str) -> Optional[str]:
 
 SLASH_COMMANDS = (
     ("/help", "this list", False),
+    ("/copy", "copy the latest reply", False),
     ("/new", "new session", False),
     ("/resume", "list sessions", False),
     ("/rename", "set session title", True),
@@ -145,6 +152,12 @@ def format_grok_tool(name: str, args: Optional[Dict] = None) -> str:
     if name == "memory_search":
         q = str(args.get("query") or args.get("path") or "")
         return f'Memory  "{q}"' if q else "Memory"
+    if name == "browser_screenshot":
+        return "browser_screenshot"
+    if name == "browser_exec":
+        code = str(args.get("code") or "").strip().splitlines()
+        first = " ".join((code[0] if code else "").split())
+        return f"browser_exec  {first}" if first else "browser_exec"
     return name
 
 
@@ -304,6 +317,28 @@ def _thought_line(dt: float) -> str:
     return _mark(f"[bold]Thought[/] [{_MUTED}]for {dt:.1f}s[/]")
 
 
+_THOUGHT_MAX_CHARS = 480
+_THOUGHT_MAX_LINES = 6
+
+
+def _clip_thought(text: str) -> str:
+    raw = text or ""
+    if not raw.strip():
+        return ""
+    lines = raw.splitlines()
+    clipped = False
+    if len(lines) > _THOUGHT_MAX_LINES:
+        lines = lines[:_THOUGHT_MAX_LINES]
+        clipped = True
+    body = "\n".join(lines)
+    if len(body) > _THOUGHT_MAX_CHARS:
+        body = body[:_THOUGHT_MAX_CHARS].rstrip()
+        clipped = True
+    if clipped:
+        body = body.rstrip() + "..."
+    return body
+
+
 def format_elapsed(seconds: float) -> str:
     total = max(int(round(seconds)), 0)
     hours, rem = divmod(total, 3600)
@@ -327,6 +362,24 @@ def format_token_short(n: int) -> str:
 
 def _muted(text: str) -> str:
     return f"[{_MUTED}]{text}[/]"
+
+
+def _display_home_path(path: Path) -> str:
+    try:
+        rel = path.resolve().relative_to(Path.home())
+    except ValueError:
+        return str(path)
+    return f"~/{rel.as_posix()}"
+
+
+def _copy_notice(text: str, path: Path) -> str:
+    n_chars = len(text)
+    n_lines = len(text.splitlines()) or 1
+    unit = "line" if n_lines == 1 else "lines"
+    return (
+        f"Copied to clipboard (also saved to {_display_home_path(path)}) "
+        f"({n_chars} chars, {n_lines} {unit})"
+    )
 
 
 _PYGMENT_COLORS = {
@@ -406,7 +459,226 @@ class TimelineRow(Static):
         height: auto;
         color: #767676;
     }
+    TimelineRow.notice {
+        height: auto;
+        color: #2F64D2;
+    }
     """
+
+
+class WaitingMark(Static):
+    """左边的菱形。等用户确认时蓝/灰交替；工具执行时实心/空心交替。"""
+
+    def __init__(
+        self,
+        *,
+        live: str = _BLUE,
+        rest: str = "#c7c7cc",
+        frozen_color: Optional[str] = None,
+        hollow: bool = False,
+    ) -> None:
+        super().__init__("", markup=True)
+        self._on = True
+        self._timer = None
+        self._live = live
+        self._rest = rest
+        self._frozen_color = frozen_color
+        self._hollow = hollow
+        self._frozen = False
+
+    def on_mount(self) -> None:
+        if getattr(self.parent, "_frozen", False):
+            self._frozen = True
+        self._paint()
+        if self._frozen:
+            return
+        self._timer = self.set_interval(0.45, self._tick)
+
+    def _tick(self) -> None:
+        self._on = not self._on
+        self._paint()
+
+    def _paint(self) -> None:
+        if self._frozen and self._frozen_color:
+            color = self._frozen_color
+            glyph = "◆"
+        elif self._on:
+            color = self._live
+            glyph = "◆"
+        else:
+            color = self._rest
+            glyph = "◇" if self._hollow else "◆"
+        self.update(f"[{color}]{glyph}[/]")
+
+    def freeze(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+        self._frozen = True
+        self._on = True
+        self._paint()
+
+
+class WaitingNotice(Horizontal):
+    DEFAULT_CSS = """
+    WaitingNotice {
+        height: auto;
+        width: 100%;
+        padding: 0 2;
+        background: #f5f5f5;
+    }
+    WaitingNotice WaitingMark {
+        width: 2;
+        height: 1;
+    }
+    WaitingNotice .wait-text {
+        width: 1fr;
+        height: auto;
+        color: #2F64D2;
+        background: #f5f5f5;
+    }
+    """
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self._text = text
+
+    def compose(self) -> ComposeResult:
+        yield WaitingMark()
+        yield Static(self._text, classes="wait-text", markup=True)
+
+    def freeze(self) -> None:
+        try:
+            self.query_one(WaitingMark).freeze()
+        except Exception:
+            pass
+
+
+class RunningToolRow(Horizontal):
+    """工具还在跑：菱形实心/空心闪，旁边是已经用了几秒。结束后菱形停住。"""
+
+    DEFAULT_CSS = """
+    RunningToolRow {
+        height: 1;
+        width: 100%;
+        padding: 0 2;
+        background: #f5f5f5;
+    }
+    RunningToolRow WaitingMark {
+        width: 2;
+        height: 1;
+        background: #f5f5f5;
+    }
+    RunningToolRow .run-text {
+        width: 1fr;
+        height: 1;
+        color: #444444;
+        background: #f5f5f5;
+    }
+    """
+
+    def __init__(self, name: str, args: Optional[Dict] = None) -> None:
+        super().__init__()
+        self._name = name
+        self._args = dict(args or {})
+        self._t0 = time.monotonic()
+        self._shown = format_elapsed(0)
+        self._frozen = False
+        self._timer = None
+
+    def _text(self, dt: float, *, final: bool) -> str:
+        body = _bold_verb(format_grok_tool(self._name, self._args))
+        if final and dt < 1.0:
+            return body
+        return f"{body}  [{_MUTED}]{format_elapsed(int(dt))}[/]"
+
+    def compose(self) -> ComposeResult:
+        yield WaitingMark(live=_MUTED, rest="#c7c7cc", frozen_color=_MUTED, hollow=True)
+        dt = max(0.0, time.monotonic() - self._t0)
+        yield Static(self._text(dt, final=self._frozen), classes="run-text", markup=True)
+
+    def on_mount(self) -> None:
+        if self._frozen:
+            self._settle()
+            return
+        self._timer = self.set_interval(0.5, self._tick)
+
+    def _tick(self) -> None:
+        if self._frozen:
+            return
+        shown = format_elapsed(int(time.monotonic() - self._t0))
+        if shown == self._shown:
+            return
+        self._shown = shown
+        self._paint_text(final=False)
+
+    def _paint_text(self, *, final: bool) -> None:
+        dt = max(0.0, time.monotonic() - self._t0)
+        try:
+            self.query_one(".run-text", Static).update(self._text(dt, final=final))
+        except Exception:
+            pass
+
+    def _settle(self) -> None:
+        try:
+            self.query_one(WaitingMark).freeze()
+        except Exception:
+            pass
+        self._paint_text(final=True)
+
+    def freeze(self) -> None:
+        self._frozen = True
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+        self._settle()
+
+
+class ThoughtBody(Static):
+    """思考正文：可拖选复制；过长只显示开头，以 ... 收住。"""
+
+    ALLOW_SELECT = True
+    DEFAULT_CSS = """
+    ThoughtBody {
+        height: auto;
+        width: 1fr;
+        margin: 0 2 1 2;
+        padding: 0;
+        color: #444444;
+        background: #f5f5f5;
+        pointer: text;
+    }
+    """
+
+    def __init__(self, text: str = "") -> None:
+        self._src = text or ""
+        shown = _clip_thought(self._src)
+        super().__init__(Text(shown, style="#444444"), shrink=True, markup=False)
+
+    def set_text(self, text: str) -> None:
+        self._src = text or ""
+        self.update(Text(_clip_thought(self._src), style="#444444"))
+
+    def get_selection(self, selection: Selection) -> Optional[Tuple[str, str]]:
+        visual = self._render()
+        width = max(int(self.content_size.width or self.size.width or 1), 1)
+        try:
+            strips = visual.render_strips(
+                width,
+                None,
+                self.visual_style,
+                RenderOptions(self._get_style, self.styles, None, None),
+            )
+            laid_out = "\n".join(strip.text for strip in strips)
+        except Exception:
+            laid_out = _clip_thought(self._src)
+        extracted = selection.extract(laid_out)
+        if extracted:
+            return extracted, "\n"
+        shown = _clip_thought(self._src)
+        if shown.strip():
+            return shown, "\n"
+        return None
 
 
 class SessionPickRow(Static):
@@ -669,6 +941,8 @@ class PromptInput(Input):
         Binding("tab", "slash_tab", show=False),
         Binding("up", "slash_up", show=False),
         Binding("down", "slash_down", show=False),
+        Binding("ctrl+c,super+c", "copy", show=False),
+        Binding("escape", "abort_key", show=False),
     ]
     DEFAULT_CSS = """
     PromptInput {
@@ -699,6 +973,28 @@ class PromptInput(Input):
 
     def _restart_blink(self) -> None:
         self._pause_blink(visible=True)
+
+    def action_abort_key(self) -> None:
+        abort = getattr(self.app, "action_abort_turn", None)
+        if callable(abort):
+            abort()
+
+    def action_copy(self) -> None:
+        app = self.app
+        if getattr(app, "_busy", False) and not (self.selected_text or "").strip():
+            abort = getattr(app, "action_abort_turn", None)
+            if callable(abort):
+                abort()
+            return
+        selected = self.selected_text
+        if selected:
+            self.app.copy_to_clipboard(selected)
+            return
+        screen_text = self.screen.get_selected_text()
+        if screen_text:
+            self.app.copy_to_clipboard(screen_text)
+            return
+        raise SkipAction()
 
     def action_slash_tab(self) -> None:
         complete = getattr(self.app, "complete_slash", None)
@@ -1101,6 +1397,12 @@ class SparkTui(App):
         margin: 0;
         padding: 0 2;
     }
+    #timeline RunningToolRow {
+        height: 1;
+        width: 100%;
+        padding: 0 2;
+        background: #f5f5f5;
+    }
     #timeline SessionPickRow {
         height: 1;
         padding: 0 2;
@@ -1114,6 +1416,10 @@ class SparkTui(App):
     }
     #timeline TimelineRow.muted {
         height: auto;
+    }
+    #timeline ThoughtBody {
+        height: auto;
+        margin: 0 2 1 2;
     }
     #timeline Prose {
         height: auto;
@@ -1193,7 +1499,10 @@ class SparkTui(App):
         self.scroll_sensitivity_y = 4.0
         self.session_id = session_id
         self.workspace = workspace
-        self.loop = ReactAgentLoop(CliDeps(), None, None)
+        from agent_loop.plugins import PluginHost
+
+        self.plugins = PluginHost()
+        self.loop = ReactAgentLoop(CliDeps(), None, self.plugins)
         self._busy = False
         self._unsub = None
         self._pending_user = None
@@ -1201,6 +1510,9 @@ class SparkTui(App):
         self._turn: Optional[VerticalGroup] = None
         self._md: Optional[Prose] = None
         self._thought: Optional[TimelineRow] = None
+        self._thought_body: Optional[ThoughtBody] = None
+        self._thought_buf = ""
+        self._last_thought_paint = 0.0
         self._think_t0: Optional[float] = None
         self._had_reasoning = False
         self._busy_t0: Optional[float] = None
@@ -1210,6 +1522,8 @@ class SparkTui(App):
         self._compactions: List[Dict] = []
         self._tools_shown = 0
         self._ellipsis = False
+        self._running_tool: Optional[RunningToolRow] = None
+        self._waiting_notice: Optional[WaitingNotice] = None
         self._follow = True
         self._last_stream_paint = 0.0
         self._resume_items: List[Dict] = []
@@ -1227,17 +1541,29 @@ class SparkTui(App):
             yield Static("›", id="prompt-mark")
             yield PromptInput(placeholder="Message or /help", id="prompt", compact=True)
 
+    def _chat_dir(self):
+        return session_log_path_for(self.workspace, self.session_id).parent
+
+    def _bind_session_logs(self) -> None:
+        from agent_loop.file_logging import configure_file_logging
+
+        chat = self._chat_dir()
+        configure_file_logging(chat)
+        self.plugins.set_session_dir(chat)
+
     def on_mount(self) -> None:
         events.print_to_stdout = False
         self._stdio_log_handlers = _quiet_stdio_logging()
         self.console.push_theme(_PROSE_THEME)
         self._unsub = events.subscribe(self._on_event)
         path = session_log_path_for(self.workspace, self.session_id)
+        self._bind_session_logs()
         self._refresh_chrome()
         self.set_interval(0.1, self._tick_think)
         self._replay_log(path)
         self._maybe_show_splash()
         self.query_one("#prompt", Input).focus()
+        self.run_worker(self.plugins.ensure_started, exclusive=True, group="plugins")
         self.run_worker(
             self._peek_update_worker,
             exclusive=True,
@@ -1266,6 +1592,7 @@ class SparkTui(App):
         if self._unsub:
             self._unsub()
             self._unsub = None
+        self.plugins.stop_sync()
 
     def _timeline(self) -> Timeline:
         return self.query_one("#timeline", VerticalScroll)
@@ -1293,6 +1620,7 @@ class SparkTui(App):
 
     def _start_turn(self, text: str) -> VerticalGroup:
         self._hide_splash()
+        self._end_running_tool()
         self._end_think()
         turn = VerticalGroup(classes="turn")
         self._timeline().mount(turn)
@@ -1300,6 +1628,9 @@ class SparkTui(App):
         self._turn = turn
         self._md = None
         self._stream_buf = ""
+        self._thought_body = None
+        self._thought_buf = ""
+        self._last_thought_paint = 0.0
         self._tools_shown = 0
         self._ellipsis = False
         self._context_used = None
@@ -1329,23 +1660,66 @@ class SparkTui(App):
         self._tick_think()
         self._scroll_follow()
 
+    def _ensure_thought_body(self) -> ThoughtBody:
+        if self._thought_body is None:
+            assert self._turn is not None
+            self._thought_body = ThoughtBody(self._thought_buf)
+            self._turn.mount(self._thought_body)
+        return self._thought_body
+
     def _end_think(self) -> None:
         dt = None
         if self._think_t0 is not None:
             dt = time.monotonic() - self._think_t0
         row = self._thought
         had = self._had_reasoning
+        buf = self._thought_buf
+        body = self._thought_body
         self._thought = None
         self._think_t0 = None
         self._had_reasoning = False
+        self._thought_buf = ""
+        self._thought_body = None
+        # 工具之间一闪而过、又没有正文的 Thought 0.2s，留着只是添乱。
+        keep = had and dt is not None and not (dt < 1.0 and not (buf or "").strip())
         if row is not None:
-            if had and dt is not None:
+            if keep:
                 row.update(_thought_line(dt))
             else:
                 row.remove()
-        elif had and dt is not None and self._turn is not None:
+                if body is not None:
+                    body.remove()
+                    body = None
+        elif keep and self._turn is not None:
             self._turn.mount(TimelineRow(_thought_line(dt), classes="thought"))
             self._scroll_follow()
+        if keep and (buf or "").strip():
+            if body is not None:
+                body.set_text(buf)
+            elif self._turn is not None:
+                self._turn.mount(ThoughtBody(buf))
+                self._scroll_follow()
+
+    def _end_running_tool(self) -> None:
+        row = self._running_tool
+        self._running_tool = None
+        if row is None or not row.is_attached:
+            return
+        row.freeze()
+
+    def _begin_running_tool(self, name: str, args: Optional[Dict] = None) -> None:
+        self._end_running_tool()
+        if self._turn is None:
+            return
+        if self._tools_shown >= _STEP_TOOLS_MAX:
+            if not self._ellipsis:
+                self._turn.mount(TimelineRow(_mark(f"[{_MUTED}]…[/]"), classes="tool"))
+                self._ellipsis = True
+            return
+        self._tools_shown += 1
+        row = RunningToolRow(name, args)
+        self._running_tool = row
+        self._turn.mount(row)
 
     def _add_tool_row(self, name: str, args: Optional[Dict] = None) -> None:
         if self._turn is None:
@@ -1422,7 +1796,13 @@ class SparkTui(App):
             piece = str(event.get("text") or "")
             if channel == "reasoning":
                 if piece:
+                    self._thought_buf += piece
                     self._begin_think()
+                    now = time.monotonic()
+                    if now - self._last_thought_paint >= 0.05:
+                        self._last_thought_paint = now
+                        self._ensure_thought_body().set_text(self._thought_buf)
+                        self._scroll_follow()
                 return
             self._end_think()
             if channel == "tool" or not piece:
@@ -1456,8 +1836,11 @@ class SparkTui(App):
             self._end_think()
             if self._md is not None:
                 self._close_prose()
-            self._add_tool_row(name, args)
+            self._begin_running_tool(name, args)
             self._scroll_follow()
+        elif kind == "tool_result":
+            self._end_running_tool()
+            self._stop_waiting_notice()
         elif kind in ("edit_diff", "write_diff"):
             if self._turn is None:
                 return
@@ -1478,12 +1861,31 @@ class SparkTui(App):
                     "after": float(event.get("after") or 0),
                 }
             )
+        elif kind == "notice":
+            self._end_think()
+            text = str(event.get("text") or "").strip()
+            if not text:
+                return
+            if self._turn is None:
+                self._start_turn("")
+            self._stop_waiting_notice()
+            row = WaitingNotice(text)
+            self._waiting_notice = row
+            self._turn.mount(row)
+            self._scroll_follow()
         elif kind == "error":
+            self._stop_waiting_notice()
             self._end_think()
             if self._turn is not None:
                 self._turn.mount(
                     TimelineRow(_mark(f"error  {event.get('text') or ''}"), classes="muted")
                 )
+
+    def _stop_waiting_notice(self) -> None:
+        row = self._waiting_notice
+        self._waiting_notice = None
+        if row is not None:
+            row.freeze()
 
     def _set_status(self, text: str) -> None:
         return
@@ -1628,11 +2030,15 @@ class SparkTui(App):
     async def _run_command(self, cmd: str, raw: str = "") -> None:
         arg = raw.split(None, 1)[1].strip() if len(raw.split(None, 1)) > 1 else ""
         if cmd == "exit":
+            self.action_abort_turn()
             self.exit()
             return
         if cmd == "help":
             self._hide_splash()
             self._timeline().mount(Prose(HELP))
+            return
+        if cmd == "copy":
+            self._copy_latest_reply()
             return
         if cmd == "session":
             self._hide_splash()
@@ -1760,7 +2166,8 @@ class SparkTui(App):
         except Exception:
             pass
         self.session_id = session_id
-        self.loop = ReactAgentLoop(CliDeps(), None, None)
+        self.loop = ReactAgentLoop(CliDeps(), None, self.plugins)
+        self._bind_session_logs()
         self._busy = False
         self._aborting = False
         self._pending_user = None
@@ -1768,6 +2175,8 @@ class SparkTui(App):
         self._md = None
         self._stream_buf = ""
         self._thought = None
+        self._thought_body = None
+        self._thought_buf = ""
         self._think_t0 = None
         self._had_reasoning = False
         self._busy_t0 = None
@@ -1776,6 +2185,7 @@ class SparkTui(App):
         self._compactions = []
         self._tools_shown = 0
         self._ellipsis = False
+        self._end_running_tool()
         self._resume_items = []
         self._resume_page = 0
         self._resume_from_id = ""
@@ -1806,6 +2216,8 @@ class SparkTui(App):
             uad["media"] = media
         try:
             await self.loop._run_loop(query, uad)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             events.emit("error", text=str(exc) or type(exc).__name__)
         finally:
@@ -1848,6 +2260,8 @@ class SparkTui(App):
         dt = None
         if self._busy_t0 is not None:
             dt = time.monotonic() - self._busy_t0
+        self._stop_waiting_notice()
+        self._end_running_tool()
         self._end_think()
         self._busy = False
         self._busy_t0 = None
@@ -1856,10 +2270,58 @@ class SparkTui(App):
             self._set_status(_IDLE)
             return
         text = self._finish_line(dt)
-        if self._turn is not None:
-            self._turn.mount(TimelineRow(_muted(text), classes="muted"))
-            self._scroll_follow()
+        turn = self._turn
+        if turn is not None and turn.is_attached and self.is_running:
+            try:
+                turn.mount(TimelineRow(_muted(text), classes="muted"))
+                self._scroll_follow()
+            except Exception:
+                logging.debug("skip finish line; timeline already gone", exc_info=True)
         self._set_status(_IDLE)
+
+    def _latest_reply(self) -> str:
+        found = ""
+        for prose in self.query(Prose):
+            src = prose._src or ""
+            if not src.strip() or src.strip() == HELP.strip():
+                continue
+            found = src
+        return found
+
+    def _copy_latest_reply(self) -> None:
+        self._hide_splash()
+        text = self._latest_reply()
+        if not text.strip():
+            self._timeline().mount(
+                TimelineRow(_mark("nothing to copy"), classes="muted")
+            )
+            return
+        path = spark_home() / "last-copy.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        self.copy_to_clipboard(text)
+        self._timeline().mount(
+            TimelineRow(_muted(_copy_notice(text, path)), classes="muted")
+        )
+
+    def copy_to_clipboard(self, text: str) -> None:
+        super().copy_to_clipboard(text)
+        if sys.platform != "darwin" or not text:
+            return
+        try:
+            subprocess.run(
+                ["pbcopy"],
+                input=text.encode("utf-8"),
+                check=False,
+                timeout=2,
+            )
+        except Exception:
+            logging.debug("[tui] pbcopy failed", exc_info=True)
+
+    def on_text_selected(self, event: TextSelected) -> None:
+        text = self.screen.get_selected_text()
+        if text and text.strip():
+            self.copy_to_clipboard(text)
 
     def action_copy_selection(self) -> None:
         text = self.screen.get_selected_text()
@@ -1955,9 +2417,17 @@ class SparkTui(App):
         abort = getattr(self.loop, "_abort", None)
         if abort is not None:
             abort.abort()
-            self._aborting = True
-            self._end_think()
-            self._set_status("aborting…")
+        plugins = getattr(self, "plugins", None)
+        cancel = getattr(plugins, "cancel", None)
+        if callable(cancel):
+            cancel()
+        self._aborting = True
+        self._end_think()
+        try:
+            self.workers.cancel_group("turn")
+        except Exception:
+            pass
+        self._set_status("aborting…")
 
     def action_page_up(self) -> None:
         self._follow = False
@@ -1978,24 +2448,36 @@ class SparkTui(App):
             self._follow = True
 
 
+_SAVED_LAST_RESORT = None
+
+
 def _quiet_stdio_logging() -> List:
-    """TUI 期间不要把 logging 打到终端，否则会盖住输入框。"""
+    """TUI 期间不要把 logging 打到终端，否则会盖住输入框。
+
+    Textual 会换掉 sys.stderr，不能靠 `stream is sys.stderr` 判断。
+    FileHandler 也是 StreamHandler 子类，必须留下。
+    """
+    global _SAVED_LAST_RESORT
     root = logging.getLogger()
     removed = []
     for handler in list(root.handlers):
-        if not isinstance(handler, logging.StreamHandler):
+        if isinstance(handler, logging.FileHandler):
             continue
-        stream = getattr(handler, "stream", None)
-        if stream in (sys.stdout, sys.stderr):
+        if isinstance(handler, logging.StreamHandler):
             root.removeHandler(handler)
             removed.append(handler)
+    _SAVED_LAST_RESORT = logging.lastResort
+    logging.lastResort = None
     return removed
 
 
 def _restore_stdio_logging(handlers: List) -> None:
+    global _SAVED_LAST_RESORT
     root = logging.getLogger()
     for handler in handlers:
         root.addHandler(handler)
+    logging.lastResort = _SAVED_LAST_RESORT
+    _SAVED_LAST_RESORT = None
 
 
 def run_tui(session_id: Optional[str] = None) -> None:

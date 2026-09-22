@@ -1,7 +1,7 @@
 #!/bin/bash
 # Permanent installer. Usage:
 #   curl -fsSL https://raw.githubusercontent.com/wangyin717/perm-agent/main/install.sh | bash
-#   curl … | bash -s -- --ref v0.1.0
+#   curl … | bash -s -- --ref v0.3.0
 #   curl … | bash -s -- --non-interactive
 set -euo pipefail
 
@@ -10,9 +10,12 @@ PERMANENT_HOME="${PERMANENT_HOME:-$HOME/.permanent}"
 SRC="$PERMANENT_HOME/src"
 UV_DIR="$PERMANENT_HOME/bin"
 LINK_DIR="${PERMANENT_LINK_DIR:-$HOME/.local/bin}"
+TOOL_DIR="$PERMANENT_HOME/uv-tools"
+PYTHON_DIR="$PERMANENT_HOME/python"
 PYTHON_VERSION="3.11"
 REF=""
 NON_INTERACTIVE=false
+SKIP_BROWSER_USE=false
 
 if [ -t 0 ]; then
   IS_INTERACTIVE=true
@@ -30,6 +33,10 @@ while [ $# -gt 0 ]; do
       NON_INTERACTIVE=true
       shift
       ;;
+    --no-browser-use)
+      SKIP_BROWSER_USE=true
+      shift
+      ;;
     -h|--help)
       cat <<'EOF'
 Permanent installer
@@ -37,6 +44,8 @@ Permanent installer
   --ref TAG     git tag (default: newest vX.Y.Z)
   --non-interactive
                 do not prompt for DEEPSEEK_API_KEY
+  --no-browser-use
+                skip installing the browser-use CLI
   -h, --help
 
 Data stays in $PERMANENT_HOME (default ~/.permanent). Re-running updates
@@ -50,6 +59,13 @@ EOF
       ;;
   esac
 done
+
+with_uv_home() {
+  UV_TOOL_DIR="$TOOL_DIR" \
+    UV_TOOL_BIN_DIR="$UV_DIR" \
+    UV_PYTHON_INSTALL_DIR="$PYTHON_DIR" \
+    "$@"
+}
 
 log() { printf '→ %s\n' "$1"; }
 ok() { printf '✓ %s\n' "$1"; }
@@ -104,6 +120,9 @@ checkout_src() {
   local target="$1"
   mkdir -p "$PERMANENT_HOME"
   chmod 700 "$PERMANENT_HOME" 2>/dev/null || true
+  if [ -d "$PERMANENT_HOME/tools" ] && [ ! -e "$TOOL_DIR" ]; then
+    mv "$PERMANENT_HOME/tools" "$TOOL_DIR"
+  fi
   if [ -d "$SRC/.git" ]; then
     log "updating $SRC"
     git -C "$SRC" remote set-url origin "$REPO_URL" 2>/dev/null || true
@@ -128,6 +147,10 @@ write_wrapper() {
   cat >"$LINK_DIR/perm" <<EOF
 #!/bin/sh
 export PERMANENT_HOME="$PERMANENT_HOME"
+export PATH="$PERMANENT_HOME/bin:\$PATH"
+export UV_TOOL_DIR="$PERMANENT_HOME/uv-tools"
+export UV_TOOL_BIN_DIR="$PERMANENT_HOME/bin"
+export UV_PYTHON_INSTALL_DIR="$PERMANENT_HOME/python"
 exec "$SRC/.venv/bin/perm" "\$@"
 EOF
   chmod 755 "$LINK_DIR/perm"
@@ -146,12 +169,53 @@ _append_path_rc() {
 }
 
 ensure_path() {
+  _append_path_rc "$HOME/.zshrc"
   _append_path_rc "$HOME/.bashrc"
   _append_path_rc "$HOME/.profile"
   case ":$PATH:" in
     *":$LINK_DIR:"*) return 0 ;;
   esac
-  ok "added $LINK_DIR to PATH in ~/.bashrc and ~/.profile"
+  ok "added $LINK_DIR to PATH in ~/.zshrc, ~/.bashrc, and ~/.profile"
+}
+
+copy_skills() {
+  local src="$SRC/agent_loop/bundled_skills"
+  local dest="$PERMANENT_HOME/skills"
+  mkdir -p "$dest"
+  if [ ! -d "$src" ]; then
+    return 0
+  fi
+  local d name
+  for d in "$src"/*/; do
+    [ -d "$d" ] || continue
+    name="$(basename "$d")"
+    if [ -f "$dest/$name/SKILL.md" ] \
+        && ! grep -qi placeholder "$dest/$name/SKILL.md"; then
+      continue
+    fi
+    rm -rf "$dest/$name"
+    cp -R "$d" "$dest/$name"
+  done
+  ok "skills $dest"
+}
+
+install_browser_use() {
+  if [ "$SKIP_BROWSER_USE" = true ]; then
+    log "skip browser-use CLI"
+    return 0
+  fi
+  log "browser-use CLI (Python 3.12)"
+  mkdir -p "$TOOL_DIR" "$PYTHON_DIR" "$UV_DIR"
+  with_uv_home "$UV_DIR/uv" python install 3.12 >/dev/null 2>&1 || true
+  if ! with_uv_home "$UV_DIR/uv" tool install --python 3.12 --upgrade browser-use; then
+    log "browser-use CLI failed; perm still works. retry: $UV_DIR/uv tool install --python 3.12 browser-use"
+    return 0
+  fi
+  if [ -x "$UV_DIR/browser-use" ]; then
+    mkdir -p "$LINK_DIR"
+    ln -sf "$UV_DIR/browser-use" "$LINK_DIR/browser-use"
+  fi
+  ok "browser-use CLI ($TOOL_DIR)"
 }
 
 prompt_key() {
@@ -200,8 +264,10 @@ log "ref $REF"
 ensure_uv
 checkout_src "$REF"
 log "uv sync"
-(cd "$SRC" && "$UV_DIR/uv" python install "$PYTHON_VERSION" >/dev/null 2>&1 || true)
-(cd "$SRC" && "$UV_DIR/uv" sync)
+(cd "$SRC" && with_uv_home "$UV_DIR/uv" python install "$PYTHON_VERSION" >/dev/null 2>&1 || true)
+(cd "$SRC" && with_uv_home "$UV_DIR/uv" sync)
+copy_skills
+install_browser_use
 write_wrapper
 ensure_path
 prompt_key

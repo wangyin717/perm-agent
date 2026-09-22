@@ -305,8 +305,8 @@ def _bold_verb(text: str) -> str:
 
 
 def _mark(text: str) -> str:
-    """过程行：菱形灰色，不跟动词抢。"""
-    return f"[{_MUTED}]◆[/]  {text}"
+    """过程行：菱形和后面的字，跟正在跑的工具行同一列。"""
+    return f"[{_MUTED}]◆[/] {text}"
 
 
 def _thinking_line(dt: float) -> str:
@@ -888,7 +888,7 @@ class Prose(Static):
     Prose {
         height: auto;
         width: 1fr;
-        margin: 1 3 1 3;
+        margin: 1 2 1 2;
         background: #f5f5f5;
         color: #444444;
     }
@@ -1371,7 +1371,7 @@ class SparkTui(App):
     }
     #chrome {
         height: 1;
-        padding: 0 1;
+        padding: 0 1 0 3;
         color: #767676;
         background: #f5f5f5;
     }
@@ -1390,7 +1390,7 @@ class SparkTui(App):
         width: 1fr;
         layout: vertical;
         margin: 0;
-        padding: 0;
+        padding: 0 0 0 2;
     }
     #timeline TimelineRow {
         height: 1;
@@ -1423,7 +1423,7 @@ class SparkTui(App):
     }
     #timeline Prose {
         height: auto;
-        margin: 1 3;
+        margin: 1 2;
         padding: 0;
         background: #f5f5f5;
     }
@@ -1660,13 +1660,6 @@ class SparkTui(App):
         self._tick_think()
         self._scroll_follow()
 
-    def _ensure_thought_body(self) -> ThoughtBody:
-        if self._thought_body is None:
-            assert self._turn is not None
-            self._thought_body = ThoughtBody(self._thought_buf)
-            self._turn.mount(self._thought_body)
-        return self._thought_body
-
     def _end_think(self) -> None:
         dt = None
         if self._think_t0 is not None:
@@ -1693,12 +1686,9 @@ class SparkTui(App):
         elif keep and self._turn is not None:
             self._turn.mount(TimelineRow(_thought_line(dt), classes="thought"))
             self._scroll_follow()
-        if keep and (buf or "").strip():
-            if body is not None:
-                body.set_text(buf)
-            elif self._turn is not None:
-                self._turn.mount(ThoughtBody(buf))
-                self._scroll_follow()
+        # 思考原文往往折成两三行，时间线上只留 Thought for Xs。
+        if body is not None:
+            body.remove()
 
     def _end_running_tool(self) -> None:
         row = self._running_tool
@@ -1798,11 +1788,6 @@ class SparkTui(App):
                 if piece:
                     self._thought_buf += piece
                     self._begin_think()
-                    now = time.monotonic()
-                    if now - self._last_thought_paint >= 0.05:
-                        self._last_thought_paint = now
-                        self._ensure_thought_body().set_text(self._thought_buf)
-                        self._scroll_follow()
                 return
             self._end_think()
             if channel == "tool" or not piece:

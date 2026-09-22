@@ -55,9 +55,7 @@ async def _run() -> None:
         assert "Thinking" in live[0]
         assert "Thought" not in live[0]
         assert "Waiting" not in _status(app), _status(app)
-        bodies = list(app.query(ThoughtBody))
-        assert len(bodies) == 1
-        assert bodies[0]._src.startswith("let me think")
+        assert list(app.query(ThoughtBody)) == []
 
         app._handle_event({"kind": "assistant_delta", "text": "hello", "channel": "content"})
         await pilot.pause()
@@ -65,9 +63,8 @@ async def _run() -> None:
         assert len(done) == 1
         assert "Thought" in done[0]
         assert "for" in done[0]
-        bodies = list(app.query(ThoughtBody))
-        assert len(bodies) == 1
-        assert "keep the rest of this sentence" in bodies[0]._src
+        assert list(app.query(ThoughtBody)) == []
+        assert "let me think" not in done[0]
 
         app._handle_event({"kind": "tools", "tool_calls": [{"name": "read"}]})
         app._handle_event({"kind": "tool_start", "name": "read", "args": {"path": "a.py"}})
@@ -605,31 +602,27 @@ def test_prose_can_copy_selection():
     asyncio.run(_copy_prose())
 
 
-async def _copy_thought() -> None:
-    from textual.events import MouseDown, MouseMove, MouseUp
+def test_thought_text_stays_off_the_timeline():
+    async def _run() -> None:
+        app = SparkTui("copy-thought", "/tmp/spark-agent-tui-copy-thought")
+        async with app.run_test(size=(80, 24)) as pilot:
+            app._start_turn("q")
+            app._handle_event(
+                {
+                    "kind": "assistant_delta",
+                    "text": "Chrome 已经连上，而且有一个已登录的 Gmail 标签。",
+                    "channel": "reasoning",
+                }
+            )
+            app._handle_event({"kind": "assistant_delta", "text": "ok", "channel": "content"})
+            await pilot.pause()
+            assert list(app.query(ThoughtBody)) == []
+            rows = _thoughts(app)
+            assert len(rows) == 1
+            assert "Thought" in rows[0]
+            assert "Gmail" not in rows[0]
 
-    app = SparkTui("copy-thought", "/tmp/spark-agent-tui-copy-thought")
-    async with app.run_test(size=(80, 24)) as pilot:
-        app._start_turn("q")
-        app._handle_event(
-            {
-                "kind": "assistant_delta",
-                "text": "Chrome 已经连上，而且有一个已登录的 Gmail 标签。",
-                "channel": "reasoning",
-            }
-        )
-        app._handle_event({"kind": "assistant_delta", "text": "ok", "channel": "content"})
-        await pilot.pause()
-        body = app.query_one(ThoughtBody)
-        await pilot._post_mouse_events([MouseMove, MouseDown], widget=body, offset=(1, 0))
-        await pilot._post_mouse_events([MouseMove], widget=body, offset=(10, 0))
-        await pilot._post_mouse_events([MouseUp], widget=body, offset=(10, 0))
-        await pilot.pause()
-        assert "已经连" in (app.clipboard or ""), repr(app.clipboard)
-
-
-def test_thought_body_can_copy_selection():
-    asyncio.run(_copy_thought())
+    asyncio.run(_run())
 
 
 def test_copy_command_copies_latest_reply_not_thought():
@@ -681,17 +674,7 @@ def test_copy_reaches_macos_pasteboard():
                 {"kind": "assistant_delta", "text": "正文可以复制", "channel": "content"}
             )
             await pilot.pause()
-            from textual.events import MouseDown, MouseMove, MouseUp
-
-            body = app.query_one(ThoughtBody)
-            await pilot._post_mouse_events(
-                [MouseMove, MouseDown], widget=body, offset=(0, 0)
-            )
-            await pilot._post_mouse_events([MouseMove], widget=body, offset=(6, 0))
-            await pilot._post_mouse_events([MouseUp], widget=body, offset=(6, 0))
-            await pilot.pause()
-            pasted = subprocess.check_output(["pbpaste"])
-            assert "思考".encode() in pasted, pasted
+            assert list(app.query(ThoughtBody)) == []
             prose = app.query_one(Prose)
             prose.text_select_all()
             await pilot.pause()
@@ -795,9 +778,10 @@ def test_empty_flash_thought_drops_and_next_thought_stays_separate():
             )
             app._handle_event({"kind": "assistant", "text": "done"})
             await pilot.pause()
-            bodies = [body._src for body in app.query(ThoughtBody)]
-            assert bodies == ["first real thought", "second thought"], bodies
-            assert len(_thoughts(app)) == 2
+            assert list(app.query(ThoughtBody)) == []
+            thoughts = _thoughts(app)
+            assert len(thoughts) == 2
+            assert all("first real thought" not in row and "second thought" not in row for row in thoughts)
 
     asyncio.run(_run())
 

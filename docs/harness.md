@@ -444,7 +444,7 @@ read 分页是「全文进内存再切一页给模型」。默认也可能只返
 
 `cli/tui.py` 订 `events`，不改 jsonl。`uv run perm` 开 TUI；`-s <id> "<问题>"` 仍是一次性 CLI。须用项目 `.venv`。界面名叫 Permanent。Python logging 和 browser-use MCP 的 stderr 写在当前会话目录：`chats/{id}/permanent.log`、`chats/{id}/browser-use-mcp.log`（TUI 不打到终端）。 `/new` `/resume` 会换到新会话的日志文件。空会话居中一张浅框：左边永恒号（环状模块舱），右边 `/new` `/resume` `/help`。`/new` 开空白会话；`/resume` 列出本项目会话（每页 10 条，点行或 ↑↓ 加回车进入，←→ 翻页），也可用 `/resume 1` 或 `/resume <id>`。标题在 `chats/{id}/title.json`（目录名仍是 id）：首条用户话自动写入，`/rename` 记 `title_is_manual`。粘贴/拖入绝对图片路径或剪贴板位图变成 `[Image #N]`，文件落在 `chats/{id}/input/images/`；user entry 记 `media.path`，投影时挂在这条 user 上。散文里的路径不当图。时间线滚动立刻跳（关掉 Textual 默认惯性动画），滚轮一次 4 行。
 
-过程行：灰色菱形 + 加粗动词。工具还在跑时，这一行的菱形在实心和空心之间闪，右边是已经用了的秒数；跑完菱形停住，不足 1 秒不留秒数。流式思维链在时间线实时走 `Thinking… Xs`，该段结束落下 `Thought for Xs`。没有正文、而且不到 1 秒的 Thought 不留下。下一段思考另起一行，不接到上一段正文后面。回合结束只在时间线落一行：
+过程行：灰色菱形 + 加粗动词。工具还在跑时，这一行的菱形在实心和空心之间闪，右边是已经用了的秒数；跑完菱形停住，不足 1 秒不留秒数。流式思维链在时间线实时走 `Thinking… Xs`，该段结束落下 `Thought for Xs`，不展开思考原文。没有正文、而且不到 1 秒的 Thought 不留下。下一段思考另起一行。回合结束只在时间线落一行：
 
 `Worked for 1m41s | deepseek-v4-flash | 112K / 1M`
 

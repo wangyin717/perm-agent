@@ -360,6 +360,37 @@ def test_loop_sees_error_and_continues(tmp_path):
     assert any(row.get("type") == "tool_result" and row.get("is_error") for row in log)
 
 
+def test_tool_step_emits_the_full_sentence(tmp_path, monkeypatch):
+    from agent_loop import events
+
+    monkeypatch.setattr(events, "print_to_stdout", False)
+    seen = []
+    unsub = events.subscribe(lambda event: seen.append(event))
+    sentence = "我先查一下微软当前的市值，然后生成 Word 文档。"
+    try:
+        llm = ScriptedLLM(
+            [
+                LLMResponse(
+                    text=sentence,
+                    tool_calls=[_bash_call("echo ok")],
+                    stop_reason="tool_use",
+                ),
+                LLMResponse(text="好了", tool_calls=[], stop_reason="end_turn"),
+            ]
+        )
+        loop = ReactAgentLoop(FakeDeps(), None, None)
+        loop._llm = llm
+        answer = asyncio.run(loop._run_loop("查市值", _uad(tmp_path)))
+    finally:
+        unsub()
+    assert answer == "好了"
+    kinds = [event.get("kind") for event in seen]
+    assistant_at = kinds.index("assistant")
+    tools_at = kinds.index("tools")
+    assert assistant_at < tools_at
+    assert seen[assistant_at]["text"] == sentence
+
+
 def test_empty_end_turn_retries_then_answers(tmp_path, monkeypatch):
     from agent_loop import events
 

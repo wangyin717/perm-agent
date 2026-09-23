@@ -56,15 +56,16 @@ from agent_loop.prompt_images import (
     try_read_dropped_paths,
 )
 
-HELP = """commands:
-  /help      this list
-  /copy      copy the latest reply (not the thought)
-  /exit      quit (/quit same)
-  /new       new session (blank history)
-  /resume    list sessions (click a row; n/p or ←/→ to page)
-  /rename    set session title (`/rename --auto` uses first prompt)
-  /session   show session id and log path
-keys: Enter send  Esc abort  Ctrl+Q quit"""
+HELP_COMMANDS = (
+    ("/help", "this list"),
+    ("/copy", "copy the latest reply (not the thought)"),
+    ("/exit", "quit (/quit same)"),
+    ("/new", "new session (blank history)"),
+    ("/resume", "list sessions (click a row; n/p or ←/→ to page)"),
+    ("/rename", "set session title (/rename --auto uses first prompt)"),
+    ("/session", "show session id and log path"),
+)
+HELP_KEYS = "Enter send    Esc abort    Ctrl+Q quit"
 
 
 _IDLE = "idle  /help  Enter send  Esc abort  Ctrl+Q quit"
@@ -483,6 +484,37 @@ class UserBanner(Static):
         margin-bottom: 1;
     }
     """
+
+
+class ApprovalHead(Horizontal):
+    def __init__(self, text: str) -> None:
+        super().__init__(classes="ap-head")
+        self._text = text
+
+    def compose(self) -> ComposeResult:
+        yield WaitingMark()
+        yield Static(self._text, classes="ap-cmd", markup=False)
+
+
+class ApprovalOption(Static):
+    """一条确认选项。不参与鼠标选字，避免点下去时父容器已经被拆掉。"""
+
+    allow_select = False
+
+    def __init__(self, index: int, action: str, label: str) -> None:
+        super().__init__(label, markup=False)
+        self.option_index = index
+        self.action = action
+
+    def on_enter(self) -> None:
+        hover = getattr(self.app, "hover_approval", None)
+        if callable(hover):
+            hover(self.option_index)
+
+    def on_click(self) -> None:
+        choose = getattr(self.app, "choose_approval", None)
+        if callable(choose):
+            self.app.call_later(choose, self.action)
 
 
 class QueueAction(Static):
@@ -1051,6 +1083,7 @@ class PromptInput(Input):
     """粘贴：整段绝对图片路径或剪贴板位图变成 [Image #N]。chip 整块删、整块跳。"""
 
     BINDINGS = [
+        Binding("shift+tab", "toggle_approval_mode", show=False),
         Binding("tab", "slash_tab", show=False),
         Binding("up", "slash_up", show=False),
         Binding("down", "slash_down", show=False),
@@ -1109,20 +1142,37 @@ class PromptInput(Input):
             return
         raise SkipAction()
 
+    def action_toggle_approval_mode(self) -> None:
+        toggle = getattr(self.app, "action_toggle_approval_mode", None)
+        if callable(toggle):
+            toggle()
+
     def action_slash_tab(self) -> None:
         complete = getattr(self.app, "complete_slash", None)
         if callable(complete) and complete():
             return
 
     def action_slash_up(self) -> None:
+        approve = getattr(self.app, "action_approval_move", None)
+        if callable(approve) and approve(-1):
+            return
         move = getattr(self.app, "move_slash", None)
         if callable(move) and move(-1):
             return
 
     def action_slash_down(self) -> None:
+        approve = getattr(self.app, "action_approval_move", None)
+        if callable(approve) and approve(1):
+            return
         move = getattr(self.app, "move_slash", None)
         if callable(move) and move(1):
             return
+
+    async def action_submit(self) -> None:
+        confirm = getattr(self.app, "action_approval_confirm", None)
+        if callable(confirm) and confirm():
+            return
+        await super().action_submit()
 
 
     def _sync_draft(self) -> None:
@@ -1234,6 +1284,49 @@ class PromptInput(Input):
         snapped = snap_cursor_out_of_chip(self.value, self.cursor_position)
         if snapped != self.cursor_position:
             self.cursor_position = snapped
+
+
+def help_row_text(name: str, hint: str) -> Text:
+    body = Text()
+    body.append(name, style="bold")
+    body.append(" " * max(2, 12 - len(name)))
+    body.append(hint, style=_MUTED)
+    return body
+
+
+class HelpRow(Static):
+    def __init__(self, name: str, hint: str) -> None:
+        super().__init__(help_row_text(name, hint), markup=False)
+        self.cmd_name = name
+        self.hint = hint
+
+
+class HelpList(VerticalGroup):
+    """/help：一条命令一行，说明跟在后面。"""
+
+    DEFAULT_CSS = """
+    HelpList {
+        height: auto;
+        width: 100%;
+        margin: 1 0;
+        padding: 0 2 0 4;
+        background: #f5f5f5;
+    }
+    HelpList HelpRow {
+        width: 100%;
+        height: auto;
+    }
+    HelpList .help-keys {
+        margin-top: 1;
+        height: auto;
+        color: #767676;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        for name, hint in HELP_COMMANDS:
+            yield HelpRow(name, hint)
+        yield Static(HELP_KEYS, classes="help-keys", markup=False)
 
 
 def slash_row_text(name: str, hint: str, selected: bool = False, prefix: str = "/") -> Text:
@@ -1485,9 +1578,20 @@ class SparkTui(App):
     #chrome {
         height: 1;
         margin: 1 0;
-        padding: 0 1 0 3;
-        color: #767676;
+        padding: 0 2 0 3;
         background: #f5f5f5;
+    }
+    #chrome-path {
+        width: 1fr;
+        height: 1;
+        color: #767676;
+        content-align: left middle;
+    }
+    #chrome-usage {
+        width: auto;
+        height: 1;
+        color: #767676;
+        content-align: right middle;
     }
     #timeline {
         height: 1fr;
@@ -1567,8 +1671,53 @@ class SparkTui(App):
     #prompt-dock {
         dock: bottom;
         height: auto;
-        padding: 0 2 1 2;
+        padding: 0 2 0 2;
         background: #f5f5f5;
+    }
+    #approval {
+        display: none;
+        height: auto;
+        width: 100%;
+        background: #dedede;
+        color: #262626;
+        padding: 0 1 1 1;
+    }
+    #approval.-open {
+        display: block;
+    }
+    #approval .ap-head {
+        height: 1;
+        width: 100%;
+    }
+    #approval .ap-head WaitingMark {
+        width: 2;
+        height: 1;
+    }
+    #approval .ap-cmd {
+        width: 1fr;
+        height: 1;
+        content-align: left middle;
+    }
+    #approval ApprovalOption {
+        height: 1;
+        width: 100%;
+        padding: 0 1;
+        color: #262626;
+        background: #dedede;
+    }
+    #approval ApprovalOption:hover {
+        background: #c8c8c8;
+    }
+    #approval ApprovalOption.-selected {
+        text-style: bold;
+    }
+    #prompt-mode {
+        height: 1;
+        width: 100%;
+        margin: 1 0 1 0;
+        color: #767676;
+        background: #f5f5f5;
+        padding: 0 1;
     }
     #prompt-wrap {
         height: 3;
@@ -1617,6 +1766,7 @@ class SparkTui(App):
     }
     """
     BINDINGS = [
+        Binding("shift+tab", "toggle_approval_mode", show=False),
         Binding("ctrl+c", "copy_selection", "Copy", show=False),
         Binding("ctrl+q", "quit", "Quit"),
         Binding("escape", "abort_turn", "Abort"),
@@ -1635,6 +1785,14 @@ class SparkTui(App):
 
         self.plugins = PluginHost()
         self.loop = ReactAgentLoop(CliDeps(), None, self.plugins)
+        self._approval_mode = "auto"
+        self._grants: set[str] = set()
+        self._approval_future = None
+        self._approval_key: Optional[str] = None
+        self._approval_options: list[tuple[str, str]] = []
+        self._approval_index = 0
+        self._approval_text = ""
+        self._bind_approver()
         self._busy = False
         self._unsub = None
         self._pending_user = None
@@ -1668,14 +1826,18 @@ class SparkTui(App):
         self._stdio_log_handlers: List = []
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="chrome")
+        with Horizontal(id="chrome"):
+            yield Static("", id="chrome-path")
+            yield Static("", id="chrome-usage")
         yield Timeline(id="timeline")
         yield Vertical(id="queue")
         yield SlashMenu()
         with Vertical(id="prompt-dock"):
+            yield Vertical(id="approval")
             with Horizontal(id="prompt-wrap"):
                 yield Static("›", id="prompt-mark")
                 yield PromptInput(placeholder="Message or /help", id="prompt", compact=True)
+            yield Static("auto", id="prompt-mode")
 
     def on_click(self, event) -> None:
         widget = event.widget
@@ -1708,6 +1870,7 @@ class SparkTui(App):
         self.set_interval(0.1, self._tick_think)
         self._replay_log(path)
         self._maybe_show_splash()
+        self._paint_approval_mode()
         self.query_one("#prompt", Input).focus()
         self.run_worker(self.plugins.ensure_started, exclusive=True, group="plugins")
         self.run_worker(
@@ -1873,6 +2036,16 @@ class SparkTui(App):
             )
         )
 
+    def _flush_stream(self) -> None:
+        # 正文最多 50ms 画一次。这一步要调工具时，没画上的后半句会一直留在缓冲区里。
+        text = self._stream_buf
+        if not text:
+            return
+        if self._md is not None and self._md._src == text:
+            return
+        self._last_stream_paint = time.monotonic()
+        self._ensure_md().set_markdown(text)
+
     def _close_prose(self) -> None:
         self._md = None
         self._stream_buf = ""
@@ -1941,6 +2114,8 @@ class SparkTui(App):
                 return
             self._end_think()
             if channel == "tool" or not piece:
+                if channel == "tool":
+                    self._flush_stream()
                 return
             self._stream_buf += piece
             now = time.monotonic()
@@ -1959,6 +2134,7 @@ class SparkTui(App):
             self._scroll_follow()
         elif kind == "tools":
             self._end_think()
+            self._flush_stream()
             if self._md is not None:
                 self._close_prose()
             self._tools_shown = 0
@@ -1969,6 +2145,7 @@ class SparkTui(App):
             if self._turn is None:
                 return
             self._end_think()
+            self._flush_stream()
             if self._md is not None:
                 self._close_prose()
             self._begin_running_tool(name, args)
@@ -1988,6 +2165,7 @@ class SparkTui(App):
         elif kind == "context":
             self._context_used = int(event.get("used") or 0)
             self._context_limit = int(event.get("limit") or 0)
+            self._refresh_chrome()
         elif kind == "compaction":
             self._compactions.append(
                 {
@@ -2252,7 +2430,8 @@ class SparkTui(App):
             return
         if cmd == "help":
             self._hide_splash()
-            self._timeline().mount(Prose(HELP))
+            self._timeline().mount(HelpList())
+            self._timeline().scroll_end(animate=False)
             return
         if cmd == "copy":
             self._copy_latest_reply()
@@ -2276,7 +2455,18 @@ class SparkTui(App):
 
     def _refresh_chrome(self) -> None:
         ensure_auto_title(self.workspace, self.session_id)
-        self.query_one("#chrome", Static).update(_chrome_label(self.workspace))
+        self.query_one("#chrome-path", Static).update(_chrome_label(self.workspace))
+        self.query_one("#chrome-usage", Static).update(self._usage_label())
+
+    def _usage_label(self) -> str:
+        from agent_loop.llm.deepseek import CONTEXT_WINDOWS, DEFAULT_CONTEXT_WINDOW
+
+        model = self._model_name()
+        limit = self._context_limit
+        if not limit:
+            limit = CONTEXT_WINDOWS.get(model, DEFAULT_CONTEXT_WINDOW)
+        used = self._context_used or 0
+        return f"{model} | {format_token_short(used)} / {format_token_short(limit)}"
 
     def _rename_session(self, arg: str) -> None:
         if not arg:
@@ -2383,6 +2573,8 @@ class SparkTui(App):
             pass
         self.session_id = session_id
         self.loop = ReactAgentLoop(CliDeps(), None, self.plugins)
+        self._grants.clear()
+        self._bind_approver()
         self._bind_session_logs()
         self._busy = False
         self._aborting = False
@@ -2507,7 +2699,7 @@ class SparkTui(App):
         found = ""
         for prose in self.query(Prose):
             src = prose._src or ""
-            if not src.strip() or src.strip() == HELP.strip():
+            if not src.strip():
                 continue
             found = src
         return found
@@ -2629,6 +2821,121 @@ class SparkTui(App):
         if cmd:
             self.run_worker(self._run_command(cmd, name), exclusive=True, group="session")
 
+    def _bind_approver(self) -> None:
+        self.loop.runtime.approver = self._approve_tool
+
+    def _paint_approval_mode(self) -> None:
+        color = "#C4A000" if self._approval_mode == "auto" else "#2F8F4E"
+        try:
+            self.query_one("#prompt-mode", Static).update(
+                f"[bold]Shift+Tab[/]: mode · [{color}]{self._approval_mode}[/]"
+            )
+        except Exception:
+            pass
+
+    def action_toggle_approval_mode(self) -> None:
+        if self._approval_mode == "auto":
+            self._approval_mode = "always-approve"
+        else:
+            self._approval_mode = "auto"
+        self._paint_approval_mode()
+        future = self._approval_future
+        if self._approval_mode == "always-approve" and future is not None and not future.done():
+            future.set_result("allow")
+
+    async def _approve_tool(self, name: str, args: Dict[str, Any]) -> str:
+        from agent_loop.approval import BROWSER_SESSION_GRANT, describe_call, grant_key, needs_approval
+
+        if self._approval_mode == "always-approve" or not needs_approval(name, args):
+            return "allow"
+        key = grant_key(name, args)
+        if key and key in self._grants:
+            return "allow"
+        if name == "browser_exec" and BROWSER_SESSION_GRANT in self._grants:
+            return "allow"
+        self._approval_key = key
+        self._show_approval(describe_call(name, args), name, key)
+        future = asyncio.get_running_loop().create_future()
+        self._approval_future = future
+        try:
+            return await future
+        finally:
+            self._approval_future = None
+            self._hide_approval()
+
+    def _approval_choices(self, name: str, key: Optional[str]) -> list[tuple[str, str]]:
+        choices = [("allow", "Allow once")]
+        if name == "browser_exec":
+            choices.append(("session", "Allow for this session"))
+        elif key:
+            choices.append(("similar", "Allow similar requests"))
+        choices.append(("deny", "Deny"))
+        return choices
+
+    def _paint_approval(self) -> None:
+        for option in self.query("#approval ApprovalOption"):
+            option.set_class(option.option_index == self._approval_index, "-selected")
+
+    def hover_approval(self, index: int) -> None:
+        if self._approval_future is None or not self._approval_options:
+            return
+        self._approval_index = index
+        self._paint_approval()
+
+    def _show_approval(self, text: str, name: str, key: Optional[str]) -> None:
+        self._approval_text = text
+        self._approval_options = self._approval_choices(name, key)
+        self._approval_index = 0
+        bar = self.query_one("#approval", Vertical)
+        bar.remove_children()
+        bar.mount(ApprovalHead(text))
+        for index, (action, label) in enumerate(self._approval_options):
+            option = ApprovalOption(index, action, label)
+            if index == 0:
+                option.add_class("-selected")
+            bar.mount(option)
+        bar.add_class("-open")
+
+    def _hide_approval(self) -> None:
+        try:
+            bar = self.query_one("#approval", Vertical)
+            bar.remove_class("-open")
+            bar.remove_children()
+        except Exception:
+            pass
+
+    def action_approval_move(self, delta: int) -> bool:
+        if self._approval_future is None or not self._approval_options:
+            return False
+        count = len(self._approval_options)
+        self._approval_index = (self._approval_index + delta) % count
+        self._paint_approval()
+        return True
+
+    def action_approval_confirm(self) -> bool:
+        if self._approval_future is None or not self._approval_options:
+            return False
+        action, _label = self._approval_options[self._approval_index]
+        self.choose_approval(action)
+        return True
+
+    def choose_approval(self, action: str) -> None:
+        from agent_loop.approval import BROWSER_SESSION_GRANT
+
+        future = self._approval_future
+        if future is None or future.done():
+            return
+        if action == "similar" and self._approval_key:
+            self._grants.add(self._approval_key)
+            future.set_result("allow")
+        elif action == "session":
+            self._grants.add(BROWSER_SESSION_GRANT)
+            future.set_result("allow")
+        elif action == "deny":
+            future.set_result("deny")
+        else:
+            future.set_result("allow")
+
     def action_abort_turn(self) -> None:
         menu = self._slash_menu()
         if menu.is_open:
@@ -2638,6 +2945,9 @@ class SparkTui(App):
         if list(self.query(ResumePicker)):
             self.run_worker(self._resume_cancel(), exclusive=True, group="session")
             return
+        future = self._approval_future
+        if future is not None and not future.done():
+            future.set_result("deny")
         abort = getattr(self.loop, "_abort", None)
         if abort is not None:
             abort.abort()

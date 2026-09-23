@@ -165,6 +165,30 @@ def test_brief_exc_keeps_one_line():
     assert _brief_exc(RuntimeError(blob)) == "Traceback (most recent call last):"
 
 
+def test_help_lists_one_command_per_row():
+    from agent_loop.cli.tui import HELP_COMMANDS, HelpList, HelpRow, Prose, help_row_text
+
+    for name, hint in HELP_COMMANDS:
+        plain = help_row_text(name, hint).plain
+        assert plain.startswith(name), plain
+        assert hint in plain
+        others = [other for other, _ in HELP_COMMANDS if other != name]
+        assert all(other not in plain for other in others), plain
+
+    async def _run() -> None:
+        app = SparkTui("help-list", "/tmp/spark-agent-tui-help")
+        async with app.run_test(size=(72, 28)) as pilot:
+            await app._run_command("help", "/help")
+            await pilot.pause()
+            rows = list(app.query(HelpRow))
+            assert [row.cmd_name for row in rows] == [name for name, _ in HELP_COMMANDS]
+            assert app.query_one(HelpList)
+            assert "Enter send" in str(app.query_one(".help-keys").content)
+            assert list(app.query(Prose)) == []
+
+    asyncio.run(_run())
+
+
 def test_slash_row_command_is_blue():
     from agent_loop.cli.tui import _BLUE, slash_row_text
 
@@ -264,9 +288,12 @@ def test_splash_on_empty_hides_when_turn_starts(tmp_path, monkeypatch):
             assert "Permanent" in blurb_text
             assert "/new" in blurb_text
             assert "/resume" in blurb_text
-            chrome = str(app.query_one("#chrome").content)
+            chrome = str(app.query_one("#chrome-path").content)
             assert str(ws.resolve()) in chrome
             assert "Permanent" not in chrome
+            usage = str(app.query_one("#chrome-usage").content)
+            assert " | " in usage
+            assert "/" in usage
             app._start_turn("hello")
             await pilot.pause()
             assert list(app.query(SplashCard)) == []
@@ -754,6 +781,53 @@ def test_browser_exec_diamond_blinks_and_counts_seconds():
     asyncio.run(_run())
 
 
+def test_tool_step_paints_the_unflushed_sentence():
+    async def _run() -> None:
+        from agent_loop.cli.tui import Prose
+
+        app = SparkTui("prose-tail", "/tmp/spark-agent-tui-prose-tail")
+        async with app.run_test(size=(100, 30)) as pilot:
+            full = "我先查一下微软当前的市值，然后生成 Word 文档。"
+            app._start_turn("q")
+            app._handle_event({"kind": "assistant_delta", "text": "我先", "channel": "content"})
+            app._handle_event(
+                {"kind": "assistant_delta", "text": full[len("我先") :], "channel": "content"}
+            )
+            app._handle_event({"kind": "tools", "tool_calls": []})
+            app._handle_event(
+                {"kind": "tool_start", "name": "web_search", "args": {"query": "MSFT"}}
+            )
+            await pilot.pause()
+            assert [w._src for w in app.query(Prose)] == [full]
+
+            app._start_turn("q2")
+            app._handle_event({"kind": "assistant_delta", "text": "已经有", "channel": "content"})
+            app._handle_event(
+                {
+                    "kind": "assistant_delta",
+                    "text": "前次生成的 PDF 和相关脚本。",
+                    "channel": "content",
+                }
+            )
+            app._handle_event({"kind": "assistant_delta", "text": "", "channel": "tool"})
+            await pilot.pause()
+            assert [w._src for w in app.query(Prose)] == [
+                full,
+                "已经有前次生成的 PDF 和相关脚本。",
+            ]
+            app._handle_event(
+                {"kind": "assistant", "text": "已经有前次生成的 PDF 和相关脚本。"}
+            )
+            app._handle_event({"kind": "tools", "tool_calls": []})
+            await pilot.pause()
+            assert [w._src for w in app.query(Prose)] == [
+                full,
+                "已经有前次生成的 PDF 和相关脚本。",
+            ]
+
+    asyncio.run(_run())
+
+
 def test_fast_tool_drops_zero_seconds_when_done():
     async def _run() -> None:
         app = SparkTui("fast-tool", "/tmp/spark-agent-tui-fast-tool")
@@ -827,6 +901,61 @@ def test_waiting_notice_diamond_blinks_until_tool_returns():
     asyncio.run(_run())
 
 
+def test_approval_list_moves_with_the_keyboard():
+    async def _run() -> None:
+        app = SparkTui("approve-bar", "/tmp/spark-agent-tui-approve-bar")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            app._approval_key = "bash:ls"
+            app._show_approval("bash  ls -la /Users/wangyin/agent_loop", "bash", "bash:ls")
+            app._approval_future = asyncio.get_running_loop().create_future()
+            await pilot.pause()
+            from agent_loop.cli.tui import ApprovalOption
+
+            labels = [str(option.content) for option in app.query("#approval ApprovalOption")]
+            assert labels == ["Allow once", "Allow similar requests", "Deny"]
+            assert app.query("#approval ApprovalOption")[0].has_class("-selected")
+            mark = app.query_one("#approval WaitingMark")
+            assert mark._timer is not None
+            first = mark._on
+            await pilot.pause(0.5)
+            assert mark._on is not first
+            await pilot.press("down")
+            await pilot.pause()
+            options = list(app.query("#approval ApprovalOption"))
+            assert options[1].has_class("-selected")
+            assert not options[0].has_class("-selected")
+            options[1].on_enter()
+            assert options[1].has_class("-selected")
+            assert not options[2].has_class("-selected")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._approval_future.done()
+            assert app._approval_future.result() == "allow"
+            assert "bash:ls" in app._grants
+
+    asyncio.run(_run())
+
+
+def test_shift_tab_toggles_approval_mode():
+    async def _run() -> None:
+        app = SparkTui("approve-mode", "/tmp/spark-agent-tui-approve-mode")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            mode = str(app.query_one("#prompt-mode").content)
+            assert "[bold]Shift+Tab[/]" in mode
+            assert "mode" in mode
+            assert "auto" in mode
+            await pilot.press("shift+tab")
+            await pilot.pause()
+            assert "always-approve" in str(app.query_one("#prompt-mode").content)
+            await pilot.press("shift+tab")
+            await pilot.pause()
+            assert "auto" in str(app.query_one("#prompt-mode").content)
+
+    asyncio.run(_run())
+
+
 def test_click_prompt_border_focuses_input():
     async def _run() -> None:
         app = SparkTui("prompt-edge", "/tmp/spark-agent-tui-prompt-edge")
@@ -838,7 +967,7 @@ def test_click_prompt_border_focuses_input():
             wrap = app.query_one("#prompt-wrap")
             assert wrap.region.x == 2
             assert wrap.region.x + wrap.region.width == 78
-            assert app.size.height - (wrap.region.y + wrap.region.height) == 1
+            assert app.size.height - (wrap.region.y + wrap.region.height) == 3
             hit = await pilot.click("#prompt-wrap", offset=(3, 0))
             await pilot.pause()
             assert hit, app.get_widget_at(*wrap.region.offset)

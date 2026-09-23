@@ -56,6 +56,7 @@ class ToolRuntime:
         self.workspace: Optional[str] = None
         self.session_dir: Optional[str] = None
         self.plugin_host = None
+        self.approver = None
         self._read_snaps: Dict[str, _ReadSnap] = {}
 
     def attach_log(self, log: Optional[SessionLog]) -> None:
@@ -103,6 +104,21 @@ class ToolRuntime:
             )
 
         decision = await self.hooks.run_before_tool(call_id, name, args)
+        if not decision.blocked and await self._user_denied(name, decision.args):
+            return PreparedCall(
+                tool_call=tool_call,
+                call_id=call_id,
+                name=name,
+                tool=tool,
+                result=self.record_tool_result(
+                    create_error_tool_result(
+                        result_id=new_result_id(),
+                        tool_call_id=call_id,
+                        tool_name=name,
+                        message="The user denied this action.",
+                    )
+                ),
+            )
         if decision.blocked:
             return PreparedCall(
                 tool_call=tool_call,
@@ -132,6 +148,13 @@ class ToolRuntime:
             started=started,
             lock_path=_lock_path(tool, started.effective_args, self.workspace),
         )
+
+    async def _user_denied(self, name: str, args: Dict[str, Any]) -> bool:
+        approver = getattr(self, "approver", None)
+        if approver is None:
+            return False
+        decision = await approver(name, args)
+        return decision == "deny"
 
     async def _execute_prepared(
         self, prepared: PreparedCall, sandbox=None

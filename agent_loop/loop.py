@@ -264,6 +264,9 @@ class ReactAgentLoop(AgentLoop):
                     log_context(used, getattr(llm, "context_window", 0) or 0)
                 if response.tool_calls:
                     empty_retries = 0
+                    # 这一步有工具时不会走进下面的纯文本分支。流式碎片可能还差最后几个字，
+                    # 这里把拼好的整句发给界面。
+                    log_llm_text(response.text or "")
                     log_llm_tools(response.tool_calls)
                     await self._handle_tool_calls(
                         messages,

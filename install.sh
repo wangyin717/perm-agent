@@ -1,7 +1,7 @@
 #!/bin/bash
 # Permanent installer. Usage:
 #   curl -fsSL https://raw.githubusercontent.com/wangyin717/perm-agent/main/install.sh | bash
-#   curl … | bash -s -- --ref v0.3.0
+#   curl … | bash -s -- --ref v0.4.0
 #   curl … | bash -s -- --non-interactive
 set -euo pipefail
 

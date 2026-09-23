@@ -221,6 +221,25 @@ def test_prompt_cursor_does_not_blink():
     asyncio.run(_run())
 
 
+def test_chrome_label_shows_branch_and_home(tmp_path, monkeypatch):
+    from agent_loop.cli import tui as tui_mod
+
+    home = tmp_path / "home"
+    project = home / "agent_loop"
+    project.mkdir(parents=True)
+
+    def fake_run(cmd, **kwargs):
+        class Proc:
+            returncode = 0
+            stdout = "main\n"
+
+        return Proc()
+
+    monkeypatch.setattr(tui_mod.Path, "home", lambda: home)
+    monkeypatch.setattr(tui_mod.subprocess, "run", fake_run)
+    assert tui_mod._chrome_label(str(project)) == "main ~/agent_loop"
+
+
 def test_splash_on_empty_hides_when_turn_starts(tmp_path, monkeypatch):
     from agent_loop.cli.tui import ENDURANCE_ART, SplashCard
 
@@ -246,7 +265,8 @@ def test_splash_on_empty_hides_when_turn_starts(tmp_path, monkeypatch):
             assert "/new" in blurb_text
             assert "/resume" in blurb_text
             chrome = str(app.query_one("#chrome").content)
-            assert chrome.startswith("Permanent")
+            assert str(ws.resolve()) in chrome
+            assert "Permanent" not in chrome
             app._start_turn("hello")
             await pilot.pause()
             assert list(app.query(SplashCard)) == []

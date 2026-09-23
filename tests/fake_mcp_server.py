@@ -46,6 +46,52 @@ def main() -> None:
         elif method == "notifications/initialized":
             continue
         elif method == "tools/list":
+            if os.environ.get("FAKE_MCP_PROFILE") == "computer":
+                _write_msg(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "result": {
+                            "tools": [
+                                {
+                                    "name": "list_windows",
+                                    "description": (
+                                        "x" * 80000
+                                        if os.environ.get("MCP_BIG_LINE")
+                                        else "List top-level windows."
+                                    ),
+                                    "inputSchema": {"type": "object", "properties": {}},
+                                },
+                                {
+                                    "name": "click",
+                                    "description": "Click one element.",
+                                    "inputSchema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "pid": {"type": "integer"},
+                                            "window_id": {"type": "integer"},
+                                            "element_index": {"type": "integer"},
+                                        },
+                                        "required": ["pid", "window_id", "element_index"],
+                                    },
+                                },
+                                {
+                                    "name": "get_window_state",
+                                    "description": "Read a window.",
+                                    "inputSchema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "pid": {"type": "integer"},
+                                            "window_id": {"type": "integer"},
+                                        },
+                                        "required": ["pid", "window_id"],
+                                    },
+                                },
+                            ]
+                        },
+                    }
+                )
+                continue
             _write_msg(
                 {
                     "jsonrpc": "2.0",
@@ -101,6 +147,23 @@ def main() -> None:
             if name == "browser_exec":
                 text = "out:" + str(args.get("code") or "")
                 content = [{"type": "text", "text": text}]
+            elif name == "list_windows":
+                content = [{"type": "text", "text": "window_id=7 pid=4"}]
+            elif name == "click":
+                content = [
+                    {
+                        "type": "text",
+                        "text": f"clicked {args.get('element_index')}",
+                    }
+                ]
+            elif name == "get_window_state":
+                import base64
+
+                png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16).decode("ascii")
+                content = [
+                    {"type": "text", "text": "elements: 2"},
+                    {"type": "image", "data": png, "mimeType": "image/png"},
+                ]
             elif name == "browser_screenshot":
                 import base64
 

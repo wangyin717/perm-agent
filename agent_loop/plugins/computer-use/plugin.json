@@ -1,0 +1,5 @@
+{
+  "name": "computer-use",
+  "enabled_by_default": true,
+  "mcp": ["cua-driver", "mcp"]
+}

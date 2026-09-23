@@ -1,7 +1,7 @@
 # Agent Loop
 
 这套 loop 参考 pi harness-v2：本地可跑、jsonl 可对账。  
-还不是完整 pi（没有多 lane、SQLite）。官方插件目前只有 browser-use。
+还不是完整 pi（没有多 lane、SQLite）。官方插件是 browser-use 和 computer-use。
 
 加工具：写 `execute` + `REPLAY` + `READ_ONLY` + 自己的 hooks，登记进 `TOOLS`，不必改循环。增删工具只改 registry + schema；人设里的工具注意事项按启用工具再拼，不要在 yaml 里抄参数表。
 
@@ -20,7 +20,7 @@
 | 模型 | `llm/deepseek.py`：`call(messages, tools)` | 再加适配器 |
 | 核心 | loop + runtime + jsonl + inbox / 压缩 / 恢复 | 尽量不塞具体工具实现 |
 | 界面 | `cli/tui.py`、`cli/trace.py`：只订 `events`，不改 jsonl | 还可有 headless |
-| 扩展 | 官方 browser-use 插件：SKILL.md + 会话进程里的两个工具 | 再加别的插件 |
+| 扩展 | 官方插件：browser-use 两个工具；computer-use 一个 `computer`，说明在 tools.md | 再加别的插件 |
 
 `tools/` + `prompt/` + `memory/` 是 **这个 coding agent 的产品能力**，和 loop 一起发布。循环真正必备的是「能调工具、能带 system」，不是必备 bash 这一份实现。现阶段一个包，不必拆成两个 Python 包。
 

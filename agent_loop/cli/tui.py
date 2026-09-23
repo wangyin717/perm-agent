@@ -38,7 +38,6 @@ from agent_loop.paths import spark_home
 from agent_loop.tools.diff_view import clip_diff_line
 from agent_loop.paths import list_sessions, session_log_path_for
 from agent_loop.session_title import (
-    display_title,
     ensure_auto_title,
     reset_auto_title,
     set_manual_title,
@@ -158,6 +157,9 @@ def format_grok_tool(name: str, args: Optional[Dict] = None) -> str:
         code = str(args.get("code") or "").strip().splitlines()
         first = " ".join((code[0] if code else "").split())
         return f"browser_exec  {first}" if first else "browser_exec"
+    if name == "computer":
+        tool = str(args.get("name") or "").strip()
+        return f"computer  {tool}" if tool else "computer"
     return name
 
 
@@ -302,6 +304,46 @@ def _bold_verb(text: str) -> str:
         arg = markup_escape(_clip_arg(parts[1]))
         return f"[bold]{parts[0]}[/] [{_MUTED}]{arg}[/]"
     return f"[bold]{text}[/]"
+
+
+def _chrome_label(workspace: str) -> str:
+    """顶栏：分支和项目路径，家目录收成 ~。"""
+    path = Path(workspace).expanduser()
+    try:
+        path = path.resolve()
+    except OSError:
+        pass
+    try:
+        home = Path.home().resolve()
+    except OSError:
+        home = Path.home()
+    try:
+        shown = "~/" + path.relative_to(home).as_posix()
+    except ValueError:
+        shown = str(path)
+    branch = _git_branch(path)
+    if branch:
+        return f"{branch} {shown}"
+    return shown
+
+
+def _git_branch(workspace: Path) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    name = (proc.stdout or "").strip()
+    if not name or name == "HEAD":
+        return ""
+    return name
 
 
 def _mark(text: str) -> str:
@@ -1442,6 +1484,7 @@ class SparkTui(App):
     }
     #chrome {
         height: 1;
+        margin: 1 0;
         padding: 0 1 0 3;
         color: #767676;
         background: #f5f5f5;
@@ -2233,8 +2276,7 @@ class SparkTui(App):
 
     def _refresh_chrome(self) -> None:
         ensure_auto_title(self.workspace, self.session_id)
-        label = display_title(self.workspace, self.session_id)
-        self.query_one("#chrome", Static).update(f"Permanent  {label}")
+        self.query_one("#chrome", Static).update(_chrome_label(self.workspace))
 
     def _rename_session(self, arg: str) -> None:
         if not arg:

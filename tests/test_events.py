@@ -37,6 +37,7 @@ def test_format_grok_tool():
         == "browser_exec  print(page_info())"
     )
     assert format_grok_tool("browser_screenshot", {}) == "browser_screenshot"
+    assert format_grok_tool("computer", {"name": "click"}) == "computer  click"
 
 
 def test_parse_slash():

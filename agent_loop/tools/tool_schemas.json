@@ -3,7 +3,7 @@
     "type": "function",
     "function": {
       "name": "bash",
-      "description": "Run a shell command in the local working directory. Use for git, tests, installs, and one-off scripts. Do not use it to cat/sed/head/read/write/grep source files — use the read, write, edit, and grep tools instead. If stdout is longer than 2000 lines or 50KB, the full output is saved under tools_result/bash/ and this result is head+tail only — grep or read that saved path. Do not pipe head/tail yourself. Do not use bash for the browser — use browser_exec and browser_screenshot. Do not launch Chrome/Chromium/Brave (no --headless, --user-data-dir, --remote-debugging-port, nohup Chrome). Do not read or copy ~/Library/Application Support/Google/Chrome.",
+      "description": "Run a shell command in the local working directory. Use for git, tests, installs, and one-off scripts. Do not use it to cat/sed/head/read/write/grep source files — use the read, write, edit, and grep tools instead. If stdout is longer than 2000 lines or 50KB, the full output is saved under tools_result/bash/ and this result is head+tail only — grep or read that saved path. Do not pipe head/tail yourself. Do not use bash for the browser — use browser_exec and browser_screenshot. Do not use bash to drive desktop apps — use the computer tool. Do not launch Chrome/Chromium/Brave (no --headless, --user-data-dir, --remote-debugging-port, nohup Chrome). Do not read or copy ~/Library/Application Support/Google/Chrome.",
       "parameters": {
         "type": "object",
         "properties": {

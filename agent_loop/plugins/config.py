@@ -1,4 +1,4 @@
-"""~/.permanent/config.json：插件开关。缺省开启 browser-use。"""
+"""~/.permanent/config.json：插件开关。browser-use 和 computer-use 缺省开启。"""
 
 from __future__ import annotations
 

@@ -60,6 +60,8 @@ tool_notes:
     ~/Library/Application Support/Google/Chrome. Browser work uses
     browser_exec / browser_screenshot (not bash). If attach is waiting
     for Allow, that happens inside browser_exec — do not start Chrome.
+    Desktop apps use the computer tool, not bash. Web pages stay on
+    browser_exec.
   memory_search: |
     For facts or preferences from earlier sessions, use memory_search
     (not grep on the repo). Recalled memory is historical — verify against

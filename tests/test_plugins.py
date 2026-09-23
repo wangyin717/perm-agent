@@ -75,6 +75,24 @@ def test_mcp_stdio_fake_server(tmp_path):
     asyncio.run(_run_fake_mcp(tmp_path))
 
 
+def test_mcp_stdio_reads_tool_list_over_64k(monkeypatch):
+    monkeypatch.setenv("FAKE_MCP_PROFILE", "computer")
+    monkeypatch.setenv("MCP_BIG_LINE", "1")
+
+    async def _run() -> None:
+        fake = Path(__file__).resolve().parent / "fake_mcp_server.py"
+        client = McpStdioClient([sys.executable, str(fake)])
+        await client.start()
+        try:
+            listed = await client.request("tools/list", {})
+            desc = listed["tools"][0]["description"]
+            assert len(desc) > 64 * 1024
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
+
+
 async def _run_host(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PERMANENT_HOME", str(tmp_path))
     fake = Path(__file__).resolve().parent / "fake_mcp_server.py"
@@ -213,6 +231,148 @@ def test_restarts_after_mcp_closed():
 
 def test_dead_mcp_fails_fast(tmp_path, monkeypatch):
     asyncio.run(_run_dead_mcp_fails_fast(tmp_path, monkeypatch))
+
+
+def test_list_windows_summary_keeps_app_pid_id_and_title():
+    from agent_loop.plugins.host import _format_window_list
+
+    payload = {
+        "content": [{"type": "text", "text": "Found 5 window(s)."}],
+        "structuredContent": {
+            "windows": [
+                {"app_name": "WindowManager", "pid": 1, "window_id": 2, "title": "菜单", "is_on_screen": True, "z_index": 9},
+                {"app_name": "企业微信", "pid": 653, "window_id": 1, "title": "", "is_on_screen": True},
+                {
+                    "app_name": "企业微信",
+                    "pid": 653,
+                    "window_id": 13172,
+                    "title": "企业微信",
+                    "is_on_screen": True,
+                    "z_index": 3,
+                },
+                {
+                    "app_name": "企业微信",
+                    "pid": 653,
+                    "window_id": 99,
+                    "title": "后面的窗口",
+                    "is_on_screen": True,
+                    "z_index": 1,
+                },
+                {"app_name": "飞书", "pid": 9, "window_id": 8, "title": "飞书", "is_on_screen": False},
+            ]
+        },
+    }
+    text = _format_window_list(payload)
+    assert text.splitlines() == [
+        "1 window(s). One on-screen window per app. Pass pid for the rest.",
+        "企业微信  pid=653  window_id=13172  企业微信",
+    ]
+    narrowed = _format_window_list(payload, narrowed=True)
+    assert "window_id=99" in narrowed
+    assert "window_id=8" in narrowed
+    assert "WindowManager" not in narrowed
+
+
+def test_computer_plugin_forwards_one_tool_and_writes_catalog(tmp_path, monkeypatch):
+    asyncio.run(_run_computer(tmp_path, monkeypatch))
+
+
+async def _run_computer(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERMANENT_HOME", str(tmp_path))
+    monkeypatch.setenv("FAKE_MCP_PROFILE", "computer")
+    fake = Path(__file__).resolve().parent / "fake_mcp_server.py"
+    host = PluginHost()
+    monkeypatch.setattr(
+        "agent_loop.plugins.host.computer_mcp_command",
+        lambda: [sys.executable, str(fake)],
+    )
+    await host.ensure_started()
+    try:
+        names = [item["function"]["name"] for item in host.openai_schemas()]
+        assert names == ["computer"]
+        catalog = tmp_path / "plugins" / "computer-use" / "tools.md"
+        text = catalog.read_text(encoding="utf-8")
+        assert "\n# click\n" in f"\n{text}"
+        assert "element_index" in text
+        assert "tools.md" in host.openai_schemas()[0]["function"]["description"]
+        out = await host.call_tool(
+            "computer",
+            {
+                "name": "click",
+                "arguments": {"pid": 4, "window_id": 7, "element_index": 2},
+            },
+            session_dir=str(tmp_path),
+        )
+        assert "clicked 2" in str(out)
+        shot = await host.call_tool(
+            "computer",
+            {"name": "get_window_state", "arguments": '{"pid": 4, "window_id": 7}'},
+            session_dir=str(tmp_path),
+        )
+        assert isinstance(shot, ToolOutput)
+        assert "tools_result/computer" in shot.media["path"]
+        assert "base64" not in shot.content
+        missing = await host.call_tool("computer", {"name": "nope"})
+        assert "unknown" in str(missing)
+    finally:
+        await host.stop()
+
+
+def test_permissions_pending_asks_the_system_dialog(monkeypatch):
+    asyncio.run(_run_permissions_pending())
+
+
+async def _run_permissions_pending() -> None:
+    from types import SimpleNamespace
+
+    host = PluginHost()
+    host._computer = SimpleNamespace(alive=True)
+    host._computer_names = {"list_apps"}
+    calls = {"n": 0}
+
+    async def once(name, args, session_dir=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return (
+                "permissions_pending: macOS Accessibility or Screen Recording "
+                "permission is still pending"
+            )
+        return "apps ok"
+
+    granted = {"n": 0}
+
+    async def grant():
+        granted["n"] += 1
+
+    host._call_computer_once = once
+    host._prompt_cua_permissions = grant
+    out = await host._call_computer({"name": "list_apps"}, None)
+    assert out == "apps ok"
+    assert granted["n"] == 1
+    assert calls["n"] == 2
+
+
+def test_computer_plugin_can_be_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("PERMANENT_HOME", str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"plugins": {"computer-use": False}}), encoding="utf-8"
+    )
+    fake = Path(__file__).resolve().parent / "fake_mcp_server.py"
+    host = PluginHost()
+    monkeypatch.setattr(
+        "agent_loop.plugins.host.computer_mcp_command",
+        lambda: [sys.executable, str(fake)],
+    )
+
+    async def _run() -> None:
+        await host.ensure_started()
+        try:
+            assert host.openai_schemas() == []
+            assert not (tmp_path / "plugins" / "computer-use" / "tools.md").is_file()
+        finally:
+            await host.stop()
+
+    asyncio.run(_run())
 
 
 def test_plugin_host_disabled(tmp_path, monkeypatch):

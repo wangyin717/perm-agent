@@ -8,6 +8,9 @@ import logging
 from typing import Any, Dict, Optional
 
 _PROTOCOL = "2024-11-05"
+# cua-driver 的 tools/list 是一行 JSON，56 个工具大约 150KB。
+# asyncio 默认 readline 上限是 64KB，超了会把连接当成已断开。
+_STREAM_LIMIT = 32 * 1024 * 1024
 
 
 class McpStdioClient:
@@ -43,6 +46,7 @@ class McpStdioClient:
             stderr=asyncio.subprocess.PIPE,
             env=self.env,
             start_new_session=True,
+            limit=_STREAM_LIMIT,
         )
         self._reader_task = asyncio.create_task(self._read_loop(), name="mcp-stdio-reader")
         self._stderr_task = asyncio.create_task(self._pump_stderr(), name="mcp-stderr")

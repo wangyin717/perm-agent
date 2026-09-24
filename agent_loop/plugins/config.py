@@ -19,6 +19,15 @@ def load_config() -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def set_setting(key: str, value: Any) -> None:
+    """改 config.json 里的一个字段，其它字段保留。"""
+    data = load_config()
+    data[key] = value
+    path = spark_home() / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def plugin_enabled(name: str, default: bool = True) -> bool:
     plugins = load_config().get("plugins")
     if not isinstance(plugins, dict):

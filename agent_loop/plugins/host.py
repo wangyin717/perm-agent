@@ -602,64 +602,53 @@ def _needs_remote_debugging_setup(text: str) -> bool:
     )
 
 
-# chrome:// 页不允许 AppleScript 执行 JS。复选框在网页里，只能走辅助功能树勾上。
-# 不点 Allow 按钮，那一下留给用户。
+# chrome:// 页不允许 AppleScript 执行 JS。网页里的复选框默认不在辅助功能树里，
+# 要先打开 AXEnhancedUserInterface，并且检查页必须是当前标签。
+# 不点 Allow 按钮，那一下留给用户。也不要 open location，避免重试时连开多页。
 _TICK_CHECKBOX = r'''
 using terms from application "System Events"
-    on tickBox(nodeRef)
+    on pressIfOff(nodeRef)
+        set boxValue to 0
         try
-            if (role of nodeRef as text) is "AXCheckBox" then
-                set labelText to ""
-                try
-                    set labelText to name of nodeRef as text
-                end try
-                if labelText is "" then
-                    try
-                        set labelText to description of nodeRef as text
-                    end try
-                end if
-                if labelText contains "Allow remote debugging" then
-                    set boxValue to 0
-                    try
-                        set boxValue to value of nodeRef as integer
-                    end try
-                    if boxValue is 0 then
-                        perform action "AXPress" of nodeRef
-                    end if
-                    return "ticked"
-                end if
-            end if
+            set boxValue to value of nodeRef as integer
         end try
-        try
-            repeat with childRef in UI elements of nodeRef
-                set childResult to my tickBox(childRef)
-                if childResult is "ticked" then return "ticked"
-            end repeat
-        end try
-        return "no"
-    end tickBox
+        if boxValue is 0 then
+            perform action "AXPress" of nodeRef
+        end if
+    end pressIfOff
 end using terms from
 
-tell application "Google Chrome"
-    activate
-    open location "chrome://inspect/#remote-debugging"
-end tell
-delay 1.2
-set resultText to "not-found"
 tell application "System Events"
-    if exists process "Google Chrome" then
-        tell process "Google Chrome"
-            set frontmost to true
-            repeat with w in windows
-                if my tickBox(w) is "ticked" then
-                    set resultText to "ticked"
-                    exit repeat
+    if not (exists process "Google Chrome") then return "not-found"
+    tell process "Google Chrome"
+        try
+            set value of attribute "AXEnhancedUserInterface" to true
+        end try
+        set frontmost to true
+        repeat with w in windows
+            try
+                set elems to entire contents of w
+            on error
+                set elems to {}
+            end try
+            repeat with e in elems
+                set roleName to ""
+                set labelText to ""
+                try
+                    set roleName to role of e as text
+                end try
+                try
+                    set labelText to name of e as text
+                end try
+                if roleName is "AXCheckBox" and labelText contains "Allow remote debugging" then
+                    my pressIfOff(e)
+                    return "ticked"
                 end if
             end repeat
-        end tell
-    end if
+        end repeat
+    end tell
 end tell
-return resultText
+return "not-found"
 '''
 
 

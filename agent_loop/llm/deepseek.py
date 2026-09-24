@@ -15,18 +15,87 @@ import aiohttp
 from agent_loop.abort import Abort, RetryCancelledError
 
 API_BASE = "https://api.deepseek.com"
-MODEL = "deepseek-v4-flash"
+ZHIPU_API_BASE = "https://open.bigmodel.cn/api/paas/v4"
+# 文档上的调用名。旧名 deepseek-v4-flash 仍会打到 Flash，这里收成新名。
+# 每一项是 (调用名, 菜单上的名字, 一行说明)。再加模型就加一行。
+MODEL = "deepseek-flash"
+MODEL_CHOICES = (
+    ("deepseek-flash", "deepseek-flash", "Fast. Reads images."),
+    ("deepseek-v4-pro", "deepseek-v4-pro", "Stronger. No images."),
+    ("glm-5.3-flash", "glm-5.3-flash", "Zhipu. Reads images."),
+    ("glm-5.3", "glm-5.3", "Zhipu flagship. No images."),
+)
+MODEL_ALIASES = {
+    "deepseek-v4-flash": "deepseek-flash",
+    "deepseek-v4-flash-vision-exp": "deepseek-flash",
+}
 CONTEXT_WINDOWS = {
+    "deepseek-flash": 1_000_000,
     "deepseek-v4-flash": 1_000_000,
+    "deepseek-v4-flash-vision-exp": 1_000_000,
     "deepseek-v4-pro": 1_000_000,
+    "glm-5.3-flash": 1_000_000,
+    "glm-5.3": 1_000_000,
 }
 DEFAULT_CONTEXT_WINDOW = 1_000_000
-# 文档：deepseek-flash 支持图像理解；旧 vision-exp 由 Flash 承接。
+# pro 不支持图像。旧 vision-exp 由 Flash 承接。
 VISION_MODELS = {
     "deepseek-flash",
     "deepseek-v4-flash",
     "deepseek-v4-flash-vision-exp",
+    "glm-5.3-flash",
 }
+
+
+def provider_of(model_id: str) -> str:
+    if (model_id or "").startswith("glm-"):
+        return "zhipu"
+    return "deepseek"
+
+
+def api_base_for(model_id: str) -> str:
+    if provider_of(model_id) == "zhipu":
+        return ZHIPU_API_BASE
+    return API_BASE
+
+
+def api_key_for(model_id: str) -> str:
+    if provider_of(model_id) == "zhipu":
+        key = (os.environ.get("ZHIPU_API_KEY") or "").strip()
+        if not key:
+            raise RuntimeError("ZHIPU_API_KEY is not set (put it in .env)")
+        return key
+    key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("DEEPSEEK_API_KEY is not set (put it in .env)")
+    return key
+
+
+def canonical_model(name: Optional[str]) -> str:
+    raw = (name or "").strip()
+    mapped = MODEL_ALIASES.get(raw, raw)
+    known = {model_id for model_id, _label, _description in MODEL_CHOICES}
+    if mapped in known:
+        return mapped
+    return MODEL
+
+
+def configured_model() -> str:
+    from agent_loop.plugins.config import load_config
+
+    raw = load_config().get("model")
+    if isinstance(raw, str):
+        return canonical_model(raw)
+    return MODEL
+
+
+def save_model(model_id: str) -> str:
+    from agent_loop.plugins.config import set_setting
+
+    model_id = canonical_model(model_id)
+    set_setting("model", model_id)
+    return model_id
+
 
 # 第 1 次不算重试；最多再试 2 次
 LLM_MAX_ATTEMPTS = 3
@@ -38,7 +107,21 @@ _BILLING_MARKERS = (
     "out of budget",
     "payment required",
     "欠费",
+    "余额不足",
+    "无可用资源包",
+    "请充值",
+    '"code":"1113"',
+    '"code": "1113"',
 )
+
+
+class LLMHTTPError(RuntimeError):
+    """HTTP 失败。message 带上响应正文，欠费不会被 aiohttp 的 Too Many Requests 盖住。"""
+
+    def __init__(self, status: int, body: str) -> None:
+        self.status = status
+        self.body = body or ""
+        super().__init__(f"HTTP {status}: {self.body[:500]}")
 
 
 @dataclass
@@ -115,13 +198,23 @@ class DeepSeekLLM:
         api_base: Optional[str] = None,
         timeout: float = 120,
     ):
-        self.api_key = (api_key or os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+        self.model = canonical_model(model) if model else MODEL
+        self.api_key = (api_key or api_key_for(self.model)).strip()
         if not self.api_key:
-            raise RuntimeError("DEEPSEEK_API_KEY is not set (put it in .env)")
-        self.model = model or MODEL
-        self.api_base = (api_base or API_BASE).rstrip("/")
+            env_name = "ZHIPU_API_KEY" if provider_of(self.model) == "zhipu" else "DEEPSEEK_API_KEY"
+            raise RuntimeError(f"{env_name} is not set (put it in .env)")
+        self.api_base = (api_base or api_base_for(self.model)).rstrip("/")
         self.timeout = timeout
         self.context_window = CONTEXT_WINDOWS.get(self.model, DEFAULT_CONTEXT_WINDOW)
+
+    def use(self, model_id: str) -> str:
+        model_id = canonical_model(model_id)
+        if provider_of(model_id) != provider_of(self.model):
+            self.api_key = api_key_for(model_id)
+            self.api_base = api_base_for(model_id)
+        self.model = model_id
+        self.context_window = CONTEXT_WINDOWS.get(self.model, DEFAULT_CONTEXT_WINDOW)
+        return self.model
 
     @property
     def supports_images(self) -> bool:
@@ -139,11 +232,23 @@ class DeepSeekLLM:
             "model": self.model,
             "messages": messages,
             "stream": True,
-            "stream_options": {"include_usage": True},
         }
+        if provider_of(self.model) == "zhipu":
+            # GLM-5.3 不能关思考。不传 temperature 和 top_p，用接口默认值。
+            # 记忆整理这种限长请求用 low，避免正文已经结束又卡一轮深度思考。
+            payload["thinking"] = {"type": "enabled"}
+            effort = kwargs.get("reasoning_effort")
+            if effort is None and kwargs.get("max_tokens") is not None:
+                effort = "low"
+            payload["reasoning_effort"] = effort or "max"
+            if tools:
+                payload["tool_stream"] = True
+        else:
+            payload["stream_options"] = {"include_usage": True}
+            if tools:
+                payload["tool_choice"] = "auto"
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = "auto"
         # max_tokens 只在压缩模块的摘要请求里传（限制摘要输出长度）；主对话循环
         # 不传，交给模型自己决定长度。
         if kwargs.get("max_tokens") is not None:
@@ -218,7 +323,7 @@ class DeepSeekLLM:
                 if resp.status >= 400:
                     body = await resp.text()
                     logging.error("[DeepSeekLLM] HTTP %s: %s", resp.status, body[:500])
-                    resp.raise_for_status()
+                    raise LLMHTTPError(resp.status, body)
                 async for obj in _iter_sse_json(resp):
                     chunks.append(obj)
                     if on_delta:

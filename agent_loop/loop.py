@@ -90,6 +90,7 @@ class ReactAgentLoop(AgentLoop):
         self._log: Optional[SessionLog] = None
         self.inbox = UserInbox()
         self._abort: Optional[Abort] = None
+        self._memory_task: Optional[asyncio.Task] = None
 
     @property
     def hooks(self):
@@ -106,8 +107,18 @@ class ReactAgentLoop(AgentLoop):
     def _get_llm(self) -> DeepSeekLLM:
         if self._llm is None:
             load_dotenv()
-            self._llm = DeepSeekLLM()
+            from agent_loop.llm.deepseek import configured_model
+
+            self._llm = DeepSeekLLM(model=configured_model())
         return self._llm
+
+    def set_model(self, model_id: str) -> str:
+        from agent_loop.llm.deepseek import save_model
+
+        model_id = save_model(model_id)
+        if self._llm is not None:
+            self._llm.use(model_id)
+        return model_id
 
     def _seed_title(self, user_action_data: Dict[str, Any], hint: str = "") -> None:
         workspace = str(user_action_data.get("workspace") or os.getcwd())
@@ -119,7 +130,43 @@ class ReactAgentLoop(AgentLoop):
             user_action_data.get("sparkHome"),
         )
 
-    async def _run_loop(self, user_query: str, user_action_data: Dict[str, Any]) -> str:
+    def _cancel_memory(self) -> None:
+        task = self._memory_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._memory_task = None
+
+    async def _remember(
+        self,
+        llm,
+        workspace: str,
+        session_id: str,
+        abort: Abort,
+        user_query: str,
+    ) -> None:
+        try:
+            await maybe_flush(
+                self._log,
+                llm,
+                workspace,
+                session_id,
+                abort,
+                user_query=user_query,
+            )
+            await maybe_dream(llm, workspace, abort, user_query=user_query, session_id=session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("[memory] after turn failed")
+
+    async def _run_loop(
+        self,
+        user_query: str,
+        user_action_data: Dict[str, Any],
+        *,
+        wait_for_memory: bool = True,
+    ) -> str:
+        self._cancel_memory()
         self._log = SessionLog(session_log_path(user_action_data))
         self.runtime.attach_log(self._log)
         self.runtime.workspace = str(user_action_data.get("workspace") or os.getcwd())
@@ -183,15 +230,12 @@ class ReactAgentLoop(AgentLoop):
             )
             self._seed_title(user_action_data, user_query)
             if not abort.aborted:
-                await maybe_flush(
-                    self._log,
-                    llm,
-                    workspace,
-                    session_id,
-                    abort,
-                    user_query=user_query,
-                )
-                await maybe_dream(llm, workspace, abort, user_query=user_query, session_id=session_id)
+                # 界面上的正文已经结束。记忆整理再打一枪模型，不占着这一回合。
+                remember = self._remember(llm, workspace, session_id, abort, user_query)
+                if wait_for_memory:
+                    await remember
+                else:
+                    self._memory_task = asyncio.create_task(remember)
             return result
         finally:
             stop_listening()

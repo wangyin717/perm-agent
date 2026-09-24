@@ -5,7 +5,7 @@
 
 加工具：写 `execute` + `REPLAY` + `READ_ONLY` + 自己的 hooks，登记进 `TOOLS`，不必改循环。增删工具只改 registry + schema；人设里的工具注意事项按启用工具再拼，不要在 yaml 里抄参数表。
 
-密钥：仓库根 `.env` 或 `~/.permanent/.env`（`DEEPSEEK_API_KEY`、`PERPLEXITY_API_KEY`，Jev 用 `TYPESAFE_API_KEY`），启动时 `envfile.load_dotenv()` 读入；已有环境变量不覆盖。`.env` 不进 git，`.env.example` 只有变量名。Jev 三处见 `docs/jev.md`。开发入口：`uv sync && uv run perm`。对外安装：`install.sh` 把代码和 venv 放到 `~/.permanent/src`，uv 管理的 Python 在 `~/.permanent/python`，browser-use 的隔离环境在 `~/.permanent/uv-tools`，命令是 `perm`（包装脚本会把 `~/.permanent/bin` 加进 PATH）；`perm update` 换到新的 `v*` tag。只有这份托管安装才在启动时检查新 tag。
+密钥：仓库根 `.env` 或 `~/.permanent/.env`（`DEEPSEEK_API_KEY`、`ZHIPU_API_KEY`、`PERPLEXITY_API_KEY`，Jev 用 `TYPESAFE_API_KEY`），启动时 `envfile.load_dotenv()` 读入；已有环境变量不覆盖。`.env` 不进 git，`.env.example` 只有变量名。Jev 三处见 `docs/jev.md`。开发入口：`uv sync && uv run perm`。对外安装：`install.sh` 把代码和 venv 放到 `~/.permanent/src`，uv 管理的 Python 在 `~/.permanent/python`，browser-use 的隔离环境在 `~/.permanent/uv-tools`，命令是 `perm`（包装脚本会把 `~/.permanent/bin` 加进 PATH）；`perm update` 换到新的 `v*` tag。只有这份托管安装才在启动时检查新 tag。
 
 跨会话 memory 见 §4。
 
@@ -446,11 +446,11 @@ read 分页是「全文进内存再切一页给模型」。默认也可能只返
 
 过程行：灰色菱形 + 加粗动词。工具还在跑时，这一行的菱形在实心和空心之间闪，右边是已经用了的秒数；跑完菱形停住，不足 1 秒不留秒数。流式思维链在时间线实时走 `Thinking… Xs`，该段结束落下 `Thought for Xs`，不展开思考原文。没有正文、而且不到 1 秒的 Thought 不留下。下一段思考另起一行。回合结束只在时间线落一行：
 
-`Worked for 1m41s | deepseek-v4-flash | 112K / 1M`
+`Worked for 1m41s | deepseek-flash | 112K / 1M`
 
 压过窗口再接 `| compacted …`。`memory flush no_reply` 不进时间线。
 
-正文是 Static + Rich 画成可选中文本；拖选后 Ctrl+C。标题后空一行，列表项不加倍行距。加粗、标题、表头是黑体；蓝色只留给链接、文件名（行内代码）。markdown 表格用 Unicode 方框。工具/Thought 行高 1。markdown 引用块灰色，不要品红。
+正文是 Static + Rich 画成可选中文本；拖选后 Ctrl+C。标题后空一行，列表项不加倍行距。加粗是正文灰，标题按级别上色，表头是黑体；蓝色只留给链接、文件名（行内代码）。markdown 表格用 Unicode 方框，整表右移两格。工具/Thought 行高 1。markdown 引用块灰色，不要品红。
 
 ---
 

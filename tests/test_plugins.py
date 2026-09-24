@@ -119,6 +119,28 @@ def test_plugin_host_with_fake_mcp(tmp_path, monkeypatch):
     asyncio.run(_run_host(tmp_path, monkeypatch))
 
 
+def test_checkbox_retry_does_not_open_another_inspect_page(monkeypatch):
+    from agent_loop.plugins.host import enable_remote_debugging_checkbox
+
+    scripts = []
+
+    class _Done:
+        returncode = 0
+        stdout = "not-found\n"
+        stderr = ""
+
+    def _run(argv, input=None, **kwargs):
+        scripts.append(input or "")
+        return _Done()
+
+    monkeypatch.setattr("agent_loop.plugins.host.subprocess.run", _run)
+    assert enable_remote_debugging_checkbox() is False
+    assert scripts
+    assert all("open location" not in script for script in scripts)
+    assert all("AXEnhancedUserInterface" in script for script in scripts)
+    assert all("AXCheckBox" in script for script in scripts)
+
+
 def test_needs_remote_debugging_setup():
     from agent_loop.plugins.host import _needs_remote_debugging_setup
 

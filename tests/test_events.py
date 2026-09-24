@@ -45,6 +45,7 @@ def test_parse_slash():
     assert parse_slash("/quit") == "exit"
     assert parse_slash("/new") == "new"
     assert parse_slash("/help") == "help"
+    assert parse_slash("/model") == "model"
     assert parse_slash("/session") == "session"
     assert parse_slash("/resume") == "resume"
     assert parse_slash("/resume 2") == "resume"

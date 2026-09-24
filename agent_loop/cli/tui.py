@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 from rich import box
 from rich.console import Console, ConsoleOptions, NewLine, RenderResult
 from rich.markdown import Heading, Markdown as RichMarkdown, TableElement
+from rich.padding import Padding
 from rich.style import Style
 from rich.table import Table
 from rich.text import Text
@@ -58,6 +59,8 @@ from agent_loop.prompt_images import (
 
 HELP_COMMANDS = (
     ("/help", "this list"),
+    ("/model", "switch model"),
+    ("/theme", "switch day or night"),
     ("/copy", "copy the latest reply (not the thought)"),
     ("/exit", "quit (/quit same)"),
     ("/new", "new session (blank history)"),
@@ -85,6 +88,10 @@ def parse_slash(text: str) -> Optional[str]:
         return "new"
     if name == "/help":
         return "help"
+    if name == "/model":
+        return "model"
+    if name == "/theme":
+        return "theme"
     if name == "/copy":
         return "copy"
     if name == "/session":
@@ -98,6 +105,8 @@ def parse_slash(text: str) -> Optional[str]:
 
 SLASH_COMMANDS = (
     ("/help", "this list", False),
+    ("/model", "switch model", False),
+    ("/theme", "switch light or dark", False),
     ("/copy", "copy the latest reply", False),
     ("/new", "new session", False),
     ("/resume", "list sessions", False),
@@ -171,35 +180,41 @@ def _clip_arg(text: str, limit: int = _ARG_MAX) -> str:
     return text[: max(limit - 1, 1)] + "…"
 
 
-# GrokDay：正文 md_text #444444，标题/强调 #262626，弱化 #767676，链接 #2F64D2
+# GrokDay：正文 #444444。标题按级别上色，加粗仍是正文灰。
 # 页底和输入框同一浅灰，不要输入框单独一块白。
 _BLUE = "#2F64D2"
 _TEXT = "#262626"
 _SECONDARY = "#444444"
 _MUTED = "#767676"
 _PAGE = "#f5f5f5"
-_PROSE_THEME = Theme(
+
+
+def _prose_rich_theme() -> Theme:
+    from agent_loop.cli.theme import palette
+
+    colors = palette()
+    return Theme(
     {
-        "markdown.h1": Style(bold=True, color=_TEXT),
-        "markdown.h2": Style(bold=True, color=_TEXT),
-        "markdown.h3": Style(bold=True, color=_TEXT),
-        "markdown.h4": Style(bold=True, color=_TEXT),
-        "markdown.h5": Style(bold=True, color=_TEXT),
-        "markdown.h6": Style(color=_MUTED),
-        "markdown.strong": Style(bold=True, color=_TEXT),
-        "markdown.code": Style(bold=True, color=_BLUE),
-        "markdown.code_block": Style(color=_BLUE),
-        "markdown.link": Style(color=_BLUE, underline=True),
-        "markdown.link_url": Style(color=_BLUE, underline=True),
-        "markdown.paragraph": Style(color=_SECONDARY),
-        "markdown.em": Style(italic=True, color=_SECONDARY),
-        "markdown.list": Style(color=_SECONDARY),
-        "markdown.item.number": Style(color=_SECONDARY),
-        "markdown.block_quote": Style(color=_MUTED),
-        "markdown.hr": Style(color=_MUTED),
-        "markdown.table.border": Style(color=_MUTED),
-        "markdown.table.header": Style(bold=True, color=_TEXT),
-        "markdown.kbd": Style(bold=True, color=_BLUE),
+        "markdown.h1": Style(bold=True, color=colors.h1),
+        "markdown.h2": Style(bold=True, color=colors.h2),
+        "markdown.h3": Style(bold=True, color=colors.h3),
+        "markdown.h4": Style(bold=True, color=colors.h4),
+        "markdown.h5": Style(bold=True, color=colors.h5),
+        "markdown.h6": Style(color=colors.h6),
+        "markdown.strong": Style(bold=True, color=colors.secondary),
+        "markdown.code": Style(bold=True, color=colors.code),
+        "markdown.code_block": Style(color=colors.code),
+        "markdown.link": Style(color=colors.blue, underline=True),
+        "markdown.link_url": Style(color=colors.blue, underline=True),
+        "markdown.paragraph": Style(color=colors.secondary),
+        "markdown.em": Style(italic=True, color=colors.secondary),
+        "markdown.list": Style(color=colors.secondary),
+        "markdown.item.number": Style(color=colors.secondary),
+        "markdown.block_quote": Style(color=colors.muted),
+        "markdown.hr": Style(color=colors.muted),
+        "markdown.table.border": Style(color=colors.muted),
+        "markdown.table.header": Style(bold=True, color=colors.text),
+        "markdown.kbd": Style(bold=True, color=colors.code),
     }
 )
 
@@ -248,7 +263,7 @@ class _BoxedTable(TableElement):
         if self.body is not None:
             for row in self.body.rows:
                 table.add_row(*[element.content for element in row.cells])
-        yield table
+        yield Padding(table, (0, 0, 0, 2))
 
 
 class ProseMarkdown(RichMarkdown):
@@ -275,17 +290,20 @@ def _markdown_as_text(src: str, width: int) -> Text:
 
     用 record + export_text(styles=True)：capture() 会丢掉 truecolor，标题/加粗就只剩粗体。
     """
-    key = (max(int(width), 8), src or " ")
+    from agent_loop.cli.theme import palette
+
+    width = max(int(width), 8)
+    key = (palette().name, width, src or " ")
     cached = _MD_CACHE.get(key)
     if cached is not None:
         return cached.copy()
     console = Console(
         file=StringIO(),
-        width=key[0],
+        width=width,
         force_terminal=True,
         color_system="truecolor",
         highlight=False,
-        theme=_PROSE_THEME,
+        theme=_prose_rich_theme(),
         legacy_windows=False,
         record=True,
     )
@@ -303,7 +321,7 @@ def _bold_verb(text: str) -> str:
     parts = text.split(None, 1)
     if len(parts) == 2:
         arg = markup_escape(_clip_arg(parts[1]))
-        return f"[bold]{parts[0]}[/] [{_MUTED}]{arg}[/]"
+        return f"[bold]{parts[0]}[/] [$muted]{arg}[/]"
     return f"[bold]{text}[/]"
 
 
@@ -349,15 +367,23 @@ def _git_branch(workspace: Path) -> str:
 
 def _mark(text: str) -> str:
     """过程行：菱形和后面的字，跟正在跑的工具行同一列。"""
-    return f"[{_MUTED}]◆[/] {text}"
+    return f"[$muted]◆[/] {text}"
+
+
+def format_wait(seconds: float) -> str:
+    """不到 10 秒保留一位小数，之后只显示整数秒。"""
+    seconds = max(0.0, float(seconds))
+    if seconds < 10:
+        return f"{seconds:.1f}s"
+    return f"{int(seconds)}s"
 
 
 def _thinking_line(dt: float) -> str:
-    return _mark(f"[bold]Thinking[/][{_MUTED}]… {dt:.1f}s[/]")
+    return _mark(f"[bold]Thinking[/][$muted]… {format_wait(dt)}[/]")
 
 
 def _thought_line(dt: float) -> str:
-    return _mark(f"[bold]Thought[/] [{_MUTED}]for {dt:.1f}s[/]")
+    return _mark(f"[bold]Thought[/] [$muted]for {format_wait(dt)}[/]")
 
 
 _THOUGHT_MAX_CHARS = 480
@@ -477,8 +503,8 @@ def highlight_code_line(code: str, filename: str = "") -> Text:
 class UserBanner(Static):
     DEFAULT_CSS = """
     UserBanner {
-        background: #dedede;
-        color: #262626;
+        background: $banner;
+        color: $text;
         padding: 1 2;
         width: 100%;
         margin-bottom: 1;
@@ -494,6 +520,85 @@ class ApprovalHead(Horizontal):
     def compose(self) -> ComposeResult:
         yield WaitingMark()
         yield Static(self._text, classes="ap-cmd", markup=False)
+
+
+def model_row_text(
+    label: str,
+    description: str,
+    *,
+    selected: bool,
+    current: bool,
+    name_width: int,
+) -> Text:
+    """› 名字 (current)    说明。说明从同一列开始。"""
+    from agent_loop.cli.theme import palette
+
+    colors = palette()
+    body = Text()
+    body.append("› " if selected else "  ", style=colors.text)
+    shown = f"{label} (current)" if current else label
+    body.append(shown, style=colors.text)
+    if description:
+        body.append(" " * max(2, name_width - len(shown) + 2))
+        body.append(description, style=colors.muted)
+    return body
+
+
+class ModelOption(Static):
+    """模型菜单里的一行。不参与鼠标选字。"""
+
+    allow_select = False
+
+    def __init__(
+        self,
+        index: int,
+        model_id: str,
+        label: str,
+        description: str,
+        name_width: int,
+        *,
+        selected: bool,
+        current: bool,
+    ) -> None:
+        self.option_index = index
+        self.value = model_id
+        self.label = label
+        self.description = description
+        self.name_width = name_width
+        super().__init__(
+            model_row_text(
+                label,
+                description,
+                selected=selected,
+                current=current,
+                name_width=name_width,
+            ),
+            markup=False,
+        )
+        if selected:
+            self.add_class("-selected")
+
+    def set_state(self, *, selected: bool, current: bool) -> None:
+        self.update(
+            model_row_text(
+                self.label,
+                self.description,
+                selected=selected,
+                current=current,
+                name_width=self.name_width,
+            )
+        )
+        self.set_class(selected, "-selected")
+
+    def on_enter(self) -> None:
+        hover = getattr(self.app, "hover_model", None)
+        if callable(hover):
+            hover(self.option_index)
+
+    def on_click(self) -> None:
+        choose = getattr(self.app, "choose_model", None)
+        if callable(choose):
+            self.app.call_later(choose, self.value)
 
 
 class ApprovalOption(Static):
@@ -545,8 +650,8 @@ class QueuedMessage(Horizontal):
     QueuedMessage {
         height: 1;
         width: 100%;
-        background: #dedede;
-        color: #262626;
+        background: $banner;
+        color: $text;
         padding: 0 2;
     }
     QueuedMessage .q-text {
@@ -557,7 +662,7 @@ class QueuedMessage(Horizontal):
     QueuedMessage QueueAction {
         width: auto;
         height: 1;
-        color: #2F64D2;
+        color: $blue;
         content-align: right middle;
         padding: 0 0 0 1;
     }
@@ -589,24 +694,32 @@ class QueuedMessage(Horizontal):
 
 
 class TimelineRow(Static):
+    def __init__(self, content: str = "", **kwargs) -> None:
+        self._markup_source = content
+        super().__init__(content, **kwargs)
+
+    def retheme(self) -> None:
+        if self._markup_source:
+            self.update(self._markup_source)
+
     DEFAULT_CSS = """
     TimelineRow {
         width: 100%;
         height: 1;
         margin: 0;
         padding: 0 2;
-        color: #444444;
+        color: $secondary;
     }
-    TimelineRow.thought { color: #444444; }
-    TimelineRow.tool { color: #444444; }
-    TimelineRow.edit { color: #444444; }
+    TimelineRow.thought { color: $secondary; }
+    TimelineRow.tool { color: $secondary; }
+    TimelineRow.edit { color: $secondary; }
     TimelineRow.muted {
         height: auto;
-        color: #767676;
+        color: $muted;
     }
     TimelineRow.notice {
         height: auto;
-        color: #2F64D2;
+        color: $blue;
     }
     """
 
@@ -644,14 +757,20 @@ class WaitingMark(Static):
         self._paint()
 
     def _paint(self) -> None:
+        from agent_loop.cli.theme import palette
+
+        colors = palette()
         if self._frozen and self._frozen_color:
             color = self._frozen_color
             glyph = "◆"
         elif self._on:
-            color = self._live
+            color = self._live if self._live not in (_BLUE, _MUTED) else (
+                colors.blue if self._live == _BLUE else colors.muted
+            )
             glyph = "◆"
         else:
-            color = self._rest
+            rest = self._rest
+            color = colors.mark_rest if rest == "#c7c7cc" else rest
             glyph = "◇" if self._hollow else "◆"
         self.update(f"[{color}]{glyph}[/]")
 
@@ -670,7 +789,7 @@ class WaitingNotice(Horizontal):
         height: auto;
         width: 100%;
         padding: 0 2;
-        background: #f5f5f5;
+        background: $page;
     }
     WaitingNotice WaitingMark {
         width: 2;
@@ -679,8 +798,8 @@ class WaitingNotice(Horizontal):
     WaitingNotice .wait-text {
         width: 1fr;
         height: auto;
-        color: #2F64D2;
-        background: #f5f5f5;
+        color: $blue;
+        background: $page;
     }
     """
 
@@ -707,18 +826,18 @@ class RunningToolRow(Horizontal):
         height: 1;
         width: 100%;
         padding: 0 2;
-        background: #f5f5f5;
+        background: $page;
     }
     RunningToolRow WaitingMark {
         width: 2;
         height: 1;
-        background: #f5f5f5;
+        background: $page;
     }
     RunningToolRow .run-text {
         width: 1fr;
         height: 1;
-        color: #444444;
-        background: #f5f5f5;
+        color: $secondary;
+        background: $page;
     }
     """
 
@@ -727,7 +846,7 @@ class RunningToolRow(Horizontal):
         self._name = name
         self._args = dict(args or {})
         self._t0 = time.monotonic()
-        self._shown = format_elapsed(0)
+        self._shown = format_wait(0)
         self._frozen = False
         self._timer = None
 
@@ -735,7 +854,7 @@ class RunningToolRow(Horizontal):
         body = _bold_verb(format_grok_tool(self._name, self._args))
         if final and dt < 1.0:
             return body
-        return f"{body}  [{_MUTED}]{format_elapsed(int(dt))}[/]"
+        return f"{body}  [{_MUTED}]{format_wait(dt)}[/]"
 
     def compose(self) -> ComposeResult:
         yield WaitingMark(live=_MUTED, rest="#c7c7cc", frozen_color=_MUTED, hollow=True)
@@ -746,12 +865,12 @@ class RunningToolRow(Horizontal):
         if self._frozen:
             self._settle()
             return
-        self._timer = self.set_interval(0.5, self._tick)
+        self._timer = self.set_interval(0.1, self._tick)
 
     def _tick(self) -> None:
         if self._frozen:
             return
-        shown = format_elapsed(int(time.monotonic() - self._t0))
+        shown = format_wait(time.monotonic() - self._t0)
         if shown == self._shown:
             return
         self._shown = shown
@@ -789,20 +908,24 @@ class ThoughtBody(Static):
         width: 1fr;
         margin: 0 2 1 2;
         padding: 0;
-        color: #444444;
-        background: #f5f5f5;
+        color: $secondary;
+        background: $page;
         pointer: text;
     }
     """
 
     def __init__(self, text: str = "") -> None:
+        from agent_loop.cli.theme import palette
+
         self._src = text or ""
         shown = _clip_thought(self._src)
-        super().__init__(Text(shown, style="#444444"), shrink=True, markup=False)
+        super().__init__(Text(shown, style=palette().secondary), shrink=True, markup=False)
 
     def set_text(self, text: str) -> None:
+        from agent_loop.cli.theme import palette
+
         self._src = text or ""
-        self.update(Text(_clip_thought(self._src), style="#444444"))
+        self.update(Text(_clip_thought(self._src), style=palette().secondary))
 
     def get_selection(self, selection: Selection) -> Optional[Tuple[str, str]]:
         visual = self._render()
@@ -835,16 +958,16 @@ class SessionPickRow(Static):
         height: 1;
         margin: 0;
         padding: 0 2;
-        color: #444444;
-        background: #f5f5f5;
+        color: $secondary;
+        background: $page;
     }
     SessionPickRow:hover {
-        background: #e8e8ea;
-        color: #262626;
+        background: $row-hover;
+        color: $text;
     }
     SessionPickRow.selected {
-        background: #d8d8dc;
-        color: #262626;
+        background: $row-on;
+        color: $text;
     }
     """
 
@@ -865,12 +988,12 @@ class ResumePageRow(Static):
         height: 1;
         margin: 0;
         padding: 0 2;
-        color: #767676;
-        background: #f5f5f5;
+        color: $muted;
+        background: $page;
     }
     ResumePageRow:hover {
-        background: #e8e8ea;
-        color: #262626;
+        background: $row-hover;
+        color: $text;
     }
     """
 
@@ -907,7 +1030,7 @@ class ResumePicker(VerticalGroup, can_focus=True):
     }
     ResumePicker .resume-head {
         height: 1;
-        color: #767676;
+        color: $muted;
         padding: 0 2;
         text-style: none;
     }
@@ -979,12 +1102,14 @@ class DiffLine(Static):
         height: 1;
         padding: 0 1 0 2;
     }
-    DiffLine.add { background: #daf2dc; }
-    DiffLine.del { background: #f5dade; }
+    DiffLine.add { background: $diff-add; }
+    DiffLine.del { background: $diff-del; }
     """
 
     def __init__(self, kind: str, ln: int, body: str, filename: str = "") -> None:
-        gutter = Text(f"{ln:>5}  ", style="#767676")
+        from agent_loop.cli.theme import palette
+
+        gutter = Text(f"{ln:>5}  ", style=palette().muted)
         renderable = gutter + highlight_code_line(body, filename)
         super().__init__(renderable, markup=False, classes=kind, expand=True)
 
@@ -1034,8 +1159,8 @@ class Prose(Static):
         height: auto;
         width: 1fr;
         margin: 1 2 1 2;
-        background: #f5f5f5;
-        color: #444444;
+        background: $page;
+        color: $secondary;
     }
     """
 
@@ -1092,24 +1217,24 @@ class PromptInput(Input):
     ]
     DEFAULT_CSS = """
     PromptInput {
-        color: #1d1d1f;
+        color: $input;
     }
     PromptInput > .input--value {
-        color: #1d1d1f;
+        color: $input;
     }
     PromptInput > .input--cursor {
-        background: #000000;
-        color: #ffffff;
+        background: $cursor-bg;
+        color: $cursor-fg;
         text-style: none;
     }
     PromptInput > .input--placeholder {
-        color: #8e8e93;
+        color: $faint;
     }
     PromptInput > .input--suggestion {
-        color: #8e8e93;
+        color: $faint;
     }
     PromptInput.-slash-cmd {
-        color: #2F64D2;
+        color: $blue;
     }
     """
 
@@ -1156,6 +1281,12 @@ class PromptInput(Input):
         approve = getattr(self.app, "action_approval_move", None)
         if callable(approve) and approve(-1):
             return
+        theme = getattr(self.app, "action_theme_move", None)
+        if callable(theme) and theme(-1):
+            return
+        pick = getattr(self.app, "action_model_move", None)
+        if callable(pick) and pick(-1):
+            return
         move = getattr(self.app, "move_slash", None)
         if callable(move) and move(-1):
             return
@@ -1164,6 +1295,12 @@ class PromptInput(Input):
         approve = getattr(self.app, "action_approval_move", None)
         if callable(approve) and approve(1):
             return
+        theme = getattr(self.app, "action_theme_move", None)
+        if callable(theme) and theme(1):
+            return
+        pick = getattr(self.app, "action_model_move", None)
+        if callable(pick) and pick(1):
+            return
         move = getattr(self.app, "move_slash", None)
         if callable(move) and move(1):
             return
@@ -1171,6 +1308,12 @@ class PromptInput(Input):
     async def action_submit(self) -> None:
         confirm = getattr(self.app, "action_approval_confirm", None)
         if callable(confirm) and confirm():
+            return
+        theme = getattr(self.app, "action_theme_confirm", None)
+        if callable(theme) and theme():
+            return
+        pick = getattr(self.app, "action_model_confirm", None)
+        if callable(pick) and pick():
             return
         await super().action_submit()
 
@@ -1287,10 +1430,12 @@ class PromptInput(Input):
 
 
 def help_row_text(name: str, hint: str) -> Text:
+    from agent_loop.cli.theme import palette
+
     body = Text()
     body.append(name, style="bold")
     body.append(" " * max(2, 12 - len(name)))
-    body.append(hint, style=_MUTED)
+    body.append(hint, style=palette().muted)
     return body
 
 
@@ -1299,6 +1444,9 @@ class HelpRow(Static):
         super().__init__(help_row_text(name, hint), markup=False)
         self.cmd_name = name
         self.hint = hint
+
+    def retheme(self) -> None:
+        self.update(help_row_text(self.cmd_name, self.hint))
 
 
 class HelpList(VerticalGroup):
@@ -1310,7 +1458,7 @@ class HelpList(VerticalGroup):
         width: 100%;
         margin: 1 0;
         padding: 0 2 0 4;
-        background: #f5f5f5;
+        background: $page;
     }
     HelpList HelpRow {
         width: 100%;
@@ -1319,7 +1467,7 @@ class HelpList(VerticalGroup):
     HelpList .help-keys {
         margin-top: 1;
         height: auto;
-        color: #767676;
+        color: $muted;
     }
     """
 
@@ -1330,18 +1478,21 @@ class HelpList(VerticalGroup):
 
 
 def slash_row_text(name: str, hint: str, selected: bool = False, prefix: str = "/") -> Text:
+    from agent_loop.cli.theme import palette
+
+    colors = palette()
     mark = "›" if selected else " "
     body = Text()
-    body.append(f"{mark} ", style=_TEXT)
+    body.append(f"{mark} ", style=colors.text)
     typed = prefix if prefix and prefix != "/" else ""
     matched = len(typed) if typed and name.lower().startswith(typed.lower()) else 0
     if matched:
-        body.append(name[:matched], style=_BLUE)
-        body.append(name[matched:], style=_TEXT)
+        body.append(name[:matched], style=colors.blue)
+        body.append(name[matched:], style=colors.text)
     else:
-        body.append(name, style=_TEXT)
+        body.append(name, style=colors.text)
     body.append(" " * max(1, 12 - len(name)))
-    body.append(hint, style=_MUTED)
+    body.append(hint, style=colors.muted)
     return body
 
 
@@ -1381,7 +1532,7 @@ class SlashMenu(VerticalGroup):
         height: auto;
         max-height: 10;
         layout: vertical;
-        background: #e4e4e6;
+        background: $menu;
         padding: 0 0;
         display: none;
     }
@@ -1391,7 +1542,7 @@ class SlashMenu(VerticalGroup):
         padding: 0 1;
     }
     SlashMenu SlashRow.selected {
-        background: #d0d0d4;
+        background: $menu-on;
     }
     """
 
@@ -1520,16 +1671,19 @@ ENDURANCE_ART = _shrink_ascii(ENDURANCE_SRC)
 
 
 def _splash_copy() -> Text:
+    from agent_loop.cli.theme import palette
+
+    colors = palette()
     text = Text()
     text.append("Permanent", style="bold")
-    text.append("  local coding agent\n\n", style="#8e8e93")
+    text.append("  local coding agent\n\n", style=colors.faint)
     for name, key in (
         ("New session", "/new"),
         ("Resume", "/resume"),
         ("Help", "/help"),
     ):
-        text.append(f"{name:<22}", style="#262626")
-        text.append(f"{key}\n", style="#8e8e93")
+        text.append(f"{name:<22}", style=colors.text)
+        text.append(f"{key}\n", style=colors.faint)
     return text
 
 
@@ -1542,22 +1696,22 @@ class SplashCard(Horizontal):
         max-width: 100%;
         height: auto;
         padding: 2 3;
-        border: round #d5d5d8;
-        background: #f5f5f5;
+        border: round $splash-border;
+        background: $page;
         layout: horizontal;
         align: left middle;
     }
     SplashCard #ship {
         width: auto;
         height: auto;
-        color: #8e8e93;
+        color: $faint;
         padding: 0 3 0 1;
     }
     SplashCard #blurb {
         width: 1fr;
         height: auto;
         padding: 1 1 1 2;
-        color: #262626;
+        color: $text;
     }
     """
 
@@ -1572,30 +1726,30 @@ class SparkTui(App):
     CSS = """
     Screen {
         layout: vertical;
-        background: #f5f5f5;
-        color: #444444;
+        background: $page;
+        color: $secondary;
     }
     #chrome {
         height: 1;
         margin: 1 0;
         padding: 0 2 0 3;
-        background: #f5f5f5;
+        background: $page;
     }
     #chrome-path {
         width: 1fr;
         height: 1;
-        color: #767676;
+        color: $muted;
         content-align: left middle;
     }
     #chrome-usage {
         width: auto;
         height: 1;
-        color: #767676;
+        color: $muted;
         content-align: right middle;
     }
     #timeline {
         height: 1fr;
-        background: #f5f5f5;
+        background: $page;
         overflow-x: hidden;
         overflow-y: scroll;
     }
@@ -1619,14 +1773,14 @@ class SparkTui(App):
         height: 1;
         width: 100%;
         padding: 0 2;
-        background: #f5f5f5;
+        background: $page;
     }
     #timeline SessionPickRow {
         height: 1;
         padding: 0 2;
     }
     #timeline SessionPickRow.selected {
-        background: #d8d8dc;
+        background: $row-on;
     }
     #timeline ResumePageRow {
         height: 1;
@@ -1646,7 +1800,7 @@ class SparkTui(App):
         height: auto;
         margin: 1 2;
         padding: 0;
-        background: #f5f5f5;
+        background: $page;
     }
     #timeline DiffBlock {
         width: 100%;
@@ -1657,12 +1811,12 @@ class SparkTui(App):
         height: 1;
         padding: 0 1 0 2;
     }
-    #timeline DiffLine.add { background: #daf2dc; }
-    #timeline DiffLine.del { background: #f5dade; }
+    #timeline DiffLine.add { background: $diff-add; }
+    #timeline DiffLine.del { background: $diff-del; }
     #queue {
         height: auto;
         width: 100%;
-        background: #f5f5f5;
+        background: $page;
         display: none;
     }
     #queue.-open {
@@ -1672,14 +1826,39 @@ class SparkTui(App):
         dock: bottom;
         height: auto;
         padding: 0 2 0 2;
-        background: #f5f5f5;
+        background: $page;
+    }
+    #model-menu, #theme-menu {
+        display: none;
+        height: auto;
+        width: 100%;
+        background: $menu;
+        color: $text;
+        padding: 0;
+        margin: 0 0 1 0;
+    }
+    #model-menu.-open, #theme-menu.-open {
+        display: block;
+    }
+    #model-menu ModelOption, #theme-menu ModelOption {
+        height: 1;
+        width: 100%;
+        padding: 0 1;
+        color: $text;
+        background: $menu;
+    }
+    #model-menu ModelOption:hover,
+    #model-menu ModelOption.-selected,
+    #theme-menu ModelOption:hover,
+    #theme-menu ModelOption.-selected {
+        background: $menu-on;
     }
     #approval {
         display: none;
         height: auto;
         width: 100%;
-        background: #dedede;
-        color: #262626;
+        background: $banner;
+        color: $text;
         padding: 0 1 1 1;
     }
     #approval.-open {
@@ -1702,21 +1881,34 @@ class SparkTui(App):
         height: 1;
         width: 100%;
         padding: 0 1;
-        color: #262626;
-        background: #dedede;
+        color: $text;
+        background: $banner;
     }
     #approval ApprovalOption:hover {
-        background: #c8c8c8;
+        background: $hover;
     }
     #approval ApprovalOption.-selected {
         text-style: bold;
+    }
+    #activity {
+        display: none;
+        height: 1;
+        width: 100%;
+        margin: 0;
+        padding: 0 1;
+        color: $muted;
+        background: $page;
+    }
+    #activity.-open {
+        display: block;
+        margin-bottom: 1;
     }
     #prompt-mode {
         height: 1;
         width: 100%;
         margin: 1 0 1 0;
-        color: #767676;
-        background: #f5f5f5;
+        color: $muted;
+        background: $page;
         padding: 0 1;
     }
     #prompt-wrap {
@@ -1724,45 +1916,45 @@ class SparkTui(App):
         width: 100%;
         margin: 0;
         padding: 0 1;
-        background: #f5f5f5;
-        border: round #c7c7cc;
+        background: $page;
+        border: round $border;
         align: left middle;
     }
     #prompt-wrap:focus-within {
-        border: round #8e8e93;
+        border: round $faint;
     }
     #prompt-mark {
         width: 2;
         height: 1;
-        color: #8e8e93;
+        color: $faint;
         content-align: left middle;
     }
     #prompt {
         width: 1fr;
         height: 1;
-        color: #1d1d1f;
-        background: #f5f5f5;
+        color: $input;
+        background: $page;
         border: none;
         padding: 0 1 0 0;
     }
     #prompt:focus {
         border: none;
         background-tint: 0%;
-        color: #1d1d1f;
+        color: $input;
     }
     #prompt > .input--value {
-        color: #1d1d1f;
+        color: $input;
     }
     #prompt > .input--cursor {
-        background: #000000;
-        color: #ffffff;
+        background: $cursor-bg;
+        color: $cursor-fg;
         text-style: none;
     }
     #prompt > .input--placeholder {
-        color: #8e8e93;
+        color: $faint;
     }
     #prompt.-slash-cmd {
-        color: #2F64D2;
+        color: $blue;
     }
     """
     BINDINGS = [
@@ -1778,6 +1970,16 @@ class SparkTui(App):
 
     def __init__(self, session_id: str, workspace: str) -> None:
         super().__init__()
+        from agent_loop.cli.theme import DAY, NIGHT, configured_theme, set_palette
+
+        for item in (DAY, NIGHT):
+            self.register_theme(item.textual())
+        theme_name = configured_theme()
+        set_palette(theme_name)
+        self.theme = theme_name
+        self._theme_name = theme_name
+        self._theme_open = False
+        self._theme_index = 0
         self.scroll_sensitivity_y = 4.0
         self.session_id = session_id
         self.workspace = workspace
@@ -1792,6 +1994,11 @@ class SparkTui(App):
         self._approval_options: list[tuple[str, str]] = []
         self._approval_index = 0
         self._approval_text = ""
+        from agent_loop.llm.deepseek import configured_model
+
+        self._model_id = configured_model()
+        self._model_open = False
+        self._model_index = 0
         self._bind_approver()
         self._busy = False
         self._unsub = None
@@ -1806,6 +2013,9 @@ class SparkTui(App):
         self._think_t0: Optional[float] = None
         self._had_reasoning = False
         self._busy_t0: Optional[float] = None
+        self._activity_kind = ""
+        self._activity_label = ""
+        self._activity_t0: Optional[float] = None
         self._aborting = False
         self._context_used: Optional[int] = None
         self._context_limit: Optional[int] = None
@@ -1833,7 +2043,10 @@ class SparkTui(App):
         yield Vertical(id="queue")
         yield SlashMenu()
         with Vertical(id="prompt-dock"):
+            yield Vertical(id="model-menu")
+            yield Vertical(id="theme-menu")
             yield Vertical(id="approval")
+            yield Static("", id="activity")
             with Horizontal(id="prompt-wrap"):
                 yield Static("›", id="prompt-mark")
                 yield PromptInput(placeholder="Message or /help", id="prompt", compact=True)
@@ -1862,7 +2075,7 @@ class SparkTui(App):
     def on_mount(self) -> None:
         events.print_to_stdout = False
         self._stdio_log_handlers = _quiet_stdio_logging()
-        self.console.push_theme(_PROSE_THEME)
+        self.console.push_theme(_prose_rich_theme())
         self._unsub = events.subscribe(self._on_event)
         path = session_log_path_for(self.workspace, self.session_id)
         self._bind_session_logs()
@@ -1952,8 +2165,64 @@ class SparkTui(App):
     def _tick_think(self) -> None:
         if self._aborting:
             return
+        if self._activity_t0 is not None:
+            self._paint_activity()
         if self._thought is not None and self._think_t0 is not None:
             self._thought.update(_thinking_line(time.monotonic() - self._think_t0))
+
+    def _set_activity(
+        self,
+        kind: str,
+        label: str,
+        *,
+        restart: bool = False,
+        t0: Optional[float] = None,
+    ) -> None:
+        if t0 is not None:
+            self._activity_t0 = t0
+        elif restart or kind != self._activity_kind or self._activity_t0 is None:
+            self._activity_t0 = time.monotonic()
+        self._activity_kind = kind
+        self._activity_label = label
+        try:
+            bar = self.query_one("#activity", Static)
+        except Exception:
+            return
+        bar.add_class("-open")
+        self._paint_activity()
+
+    def _clear_activity(self) -> None:
+        self._activity_kind = ""
+        self._activity_label = ""
+        self._activity_t0 = None
+        try:
+            bar = self.query_one("#activity", Static)
+        except Exception:
+            return
+        bar.remove_class("-open")
+        bar.update("")
+
+    def _paint_activity(self) -> None:
+        if self._activity_t0 is None or not self._activity_label:
+            return
+        t0 = self._activity_t0
+        if self._activity_kind == "think" and self._think_t0 is not None:
+            t0 = self._think_t0
+        elapsed = format_wait(time.monotonic() - t0)
+        try:
+            self.query_one("#activity", Static).update(f"{self._activity_label}... {elapsed}")
+        except Exception:
+            pass
+
+    def _show_llm_wait(self, *, restart: bool = False) -> None:
+        self._set_activity("wait", "waiting for response", restart=restart)
+
+    def _tool_activity_label(self, name: str, args: Optional[Dict] = None) -> str:
+        if name == "computer":
+            action = str((args or {}).get("name") or "").strip()
+            if action:
+                return f"executing computer {action}"
+        return f"executing {name}"
 
     def _begin_think(self) -> None:
         if self._turn is None:
@@ -1964,6 +2233,7 @@ class SparkTui(App):
         assert self._turn is not None
         self._had_reasoning = True
         self._think_t0 = time.monotonic()
+        self._set_activity("think", "thinking", t0=self._think_t0)
         self._thought = TimelineRow(_thinking_line(0.0), classes="thought")
         self._turn.mount(self._thought)
         self._tick_think()
@@ -2008,6 +2278,7 @@ class SparkTui(App):
 
     def _begin_running_tool(self, name: str, args: Optional[Dict] = None) -> None:
         self._end_running_tool()
+        self._set_activity("tool", self._tool_activity_label(name, args), restart=True)
         if self._turn is None:
             return
         if self._tools_shown >= _STEP_TOOLS_MAX:
@@ -2113,6 +2384,8 @@ class SparkTui(App):
                     self._begin_think()
                 return
             self._end_think()
+            if channel != "tool" and piece:
+                self._clear_activity()
             if channel == "tool" or not piece:
                 if channel == "tool":
                     self._flush_stream()
@@ -2124,6 +2397,7 @@ class SparkTui(App):
                 self._ensure_md().set_markdown(self._stream_buf)
                 self._scroll_follow()
         elif kind == "assistant":
+            self._clear_activity()
             self._end_think()
             full = str(event.get("text") or "").rstrip()
             if full:
@@ -2153,6 +2427,8 @@ class SparkTui(App):
         elif kind == "tool_result":
             self._end_running_tool()
             self._stop_waiting_notice()
+            if self._busy:
+                self._show_llm_wait(restart=True)
         elif kind in ("edit_diff", "write_diff"):
             if self._turn is None:
                 return
@@ -2187,6 +2463,7 @@ class SparkTui(App):
             self._turn.mount(row)
             self._scroll_follow()
         elif kind == "error":
+            self._clear_activity()
             self._stop_waiting_notice()
             self._end_think()
             if self._turn is not None:
@@ -2336,6 +2613,7 @@ class SparkTui(App):
         self._busy_t0 = time.monotonic()
         self._pending_user = text
         self._start_turn(text)
+        self._show_llm_wait()
         self.run_worker(self._run_turn(text, media), exclusive=True, group="turn")
 
     def _queue_box(self) -> Vertical:
@@ -2392,6 +2670,7 @@ class SparkTui(App):
         self._busy_t0 = time.monotonic()
         self._pending_user = text
         self._start_turn(text)
+        self._show_llm_wait()
         self.run_worker(self._run_turn(text, media), exclusive=True, group="turn")
 
     def edit_queued(self, qid: str) -> None:
@@ -2432,6 +2711,18 @@ class SparkTui(App):
             self._hide_splash()
             self._timeline().mount(HelpList())
             self._timeline().scroll_end(animate=False)
+            return
+        if cmd == "model":
+            if self._approval_future is not None:
+                return
+            self._hide_theme_menu()
+            self._show_model_menu()
+            return
+        if cmd == "theme":
+            if self._approval_future is not None:
+                return
+            self._hide_model_menu()
+            self._show_theme_menu()
             return
         if cmd == "copy":
             self._copy_latest_reply()
@@ -2578,6 +2869,7 @@ class SparkTui(App):
         self._bind_session_logs()
         self._busy = False
         self._aborting = False
+        self._clear_activity()
         self._pending_user = None
         self._turn = None
         self._md = None
@@ -2631,7 +2923,7 @@ class SparkTui(App):
         if media:
             uad["media"] = media
         try:
-            await self.loop._run_loop(query, uad)
+            await self.loop._run_loop(query, uad, wait_for_memory=False)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -2644,12 +2936,10 @@ class SparkTui(App):
 
     def _model_name(self) -> str:
         llm = getattr(self.loop, "_llm", None)
-        name = getattr(llm, "model", None)
+        name = getattr(llm, "model", None) if llm is not None else None
         if name:
             return str(name)
-        from agent_loop.llm.deepseek import MODEL
-
-        return MODEL
+        return self._model_id
 
     def _context_text(self) -> str:
         if not self._context_limit:
@@ -2677,6 +2967,7 @@ class SparkTui(App):
         if self._busy_t0 is not None:
             dt = time.monotonic() - self._busy_t0
         self._stop_waiting_notice()
+        self._clear_activity()
         self._end_running_tool()
         self._end_think()
         self._busy = False
@@ -2864,13 +3155,11 @@ class SparkTui(App):
             self._hide_approval()
 
     def _approval_choices(self, name: str, key: Optional[str]) -> list[tuple[str, str]]:
-        choices = [("allow", "Allow once")]
-        if name == "browser_exec":
-            choices.append(("session", "Allow for this session"))
-        elif key:
-            choices.append(("similar", "Allow similar requests"))
-        choices.append(("deny", "Deny"))
-        return choices
+        return [
+            ("allow", "Allow once"),
+            ("always", "yes, and always approve"),
+            ("deny", "Deny"),
+        ]
 
     def _paint_approval(self) -> None:
         for option in self.query("#approval ApprovalOption"):
@@ -2895,6 +3184,7 @@ class SparkTui(App):
                 option.add_class("-selected")
             bar.mount(option)
         bar.add_class("-open")
+        self._set_activity("approval", "waiting for approval", restart=True)
 
     def _hide_approval(self) -> None:
         try:
@@ -2920,27 +3210,206 @@ class SparkTui(App):
         return True
 
     def choose_approval(self, action: str) -> None:
-        from agent_loop.approval import BROWSER_SESSION_GRANT
-
         future = self._approval_future
         if future is None or future.done():
             return
-        if action == "similar" and self._approval_key:
-            self._grants.add(self._approval_key)
-            future.set_result("allow")
-        elif action == "session":
-            self._grants.add(BROWSER_SESSION_GRANT)
+        if action == "always":
+            self._approval_mode = "always-approve"
+            self._paint_approval_mode()
             future.set_result("allow")
         elif action == "deny":
             future.set_result("deny")
         else:
             future.set_result("allow")
 
+    def _show_model_menu(self) -> None:
+        from agent_loop.llm.deepseek import MODEL_CHOICES
+
+        self._model_index = 0
+        for index, (model_id, _label, _description) in enumerate(MODEL_CHOICES):
+            if model_id == self._model_id:
+                self._model_index = index
+                break
+        self._model_open = True
+        name_width = max(
+            len(f"{label} (current)") for _model_id, label, _description in MODEL_CHOICES
+        )
+        bar = self.query_one("#model-menu", Vertical)
+        bar.remove_children()
+        for index, (model_id, label, description) in enumerate(MODEL_CHOICES):
+            bar.mount(
+                ModelOption(
+                    index,
+                    model_id,
+                    label,
+                    description,
+                    name_width,
+                    selected=index == self._model_index,
+                    current=model_id == self._model_id,
+                )
+            )
+        bar.add_class("-open")
+
+    def _hide_model_menu(self) -> None:
+        self._model_open = False
+        try:
+            bar = self.query_one("#model-menu", Vertical)
+            bar.remove_class("-open")
+            bar.remove_children()
+        except Exception:
+            pass
+
+    def _paint_model_menu(self) -> None:
+        for option in self.query("#model-menu ModelOption"):
+            option.set_state(
+                selected=option.option_index == self._model_index,
+                current=option.value == self._model_id,
+            )
+
+    def hover_model(self, index: int) -> None:
+        if self._theme_open:
+            self._theme_index = index
+            self._paint_theme_menu()
+            return
+        if not self._model_open:
+            return
+        self._model_index = index
+        self._paint_model_menu()
+
+    def action_model_move(self, delta: int) -> bool:
+        from agent_loop.llm.deepseek import MODEL_CHOICES
+
+        if not self._model_open or not MODEL_CHOICES:
+            return False
+        count = len(MODEL_CHOICES)
+        self._model_index = (self._model_index + delta) % count
+        self._paint_model_menu()
+        return True
+
+    def action_model_confirm(self) -> bool:
+        from agent_loop.llm.deepseek import MODEL_CHOICES
+
+        if not self._model_open or not MODEL_CHOICES:
+            return False
+        model_id = MODEL_CHOICES[self._model_index][0]
+        self.choose_model(model_id)
+        return True
+
+    def _show_theme_menu(self) -> None:
+        from agent_loop.cli.theme import PALETTES
+
+        names = list(PALETTES)
+        self._theme_index = names.index(self._theme_name) if self._theme_name in names else 0
+        self._theme_open = True
+        name_width = max(len(f"{name} (current)") for name in names)
+        hints = {"day": "Light", "night": "Dark"}
+        bar = self.query_one("#theme-menu", Vertical)
+        bar.remove_children()
+        for index, name in enumerate(names):
+            bar.mount(
+                ModelOption(
+                    index,
+                    name,
+                    name,
+                    hints.get(name, ""),
+                    name_width,
+                    selected=index == self._theme_index,
+                    current=name == self._theme_name,
+                )
+            )
+        bar.add_class("-open")
+
+    def _hide_theme_menu(self) -> None:
+        self._theme_open = False
+        try:
+            bar = self.query_one("#theme-menu", Vertical)
+            bar.remove_class("-open")
+            bar.remove_children()
+        except Exception:
+            pass
+
+    def _paint_theme_menu(self) -> None:
+        for option in self.query("#theme-menu ModelOption"):
+            option.set_state(
+                selected=option.option_index == self._theme_index,
+                current=option.value == self._theme_name,
+            )
+
+    def action_theme_move(self, delta: int) -> bool:
+        from agent_loop.cli.theme import PALETTES
+
+        if not self._theme_open:
+            return False
+        count = len(PALETTES)
+        self._theme_index = (self._theme_index + delta) % count
+        self._paint_theme_menu()
+        return True
+
+    def action_theme_confirm(self) -> bool:
+        from agent_loop.cli.theme import PALETTES
+
+        if not self._theme_open:
+            return False
+        name = list(PALETTES)[self._theme_index]
+        self.choose_theme(name)
+        return True
+
+    def choose_theme(self, value: str) -> None:
+        if not self._theme_open:
+            return
+        self._apply_theme(value)
+        self._hide_theme_menu()
+
+    def _apply_theme(self, name: str) -> None:
+        from agent_loop.cli.theme import save_theme
+
+        self._theme_name = save_theme(name)
+        self.theme = self._theme_name
+        _MD_CACHE.clear()
+        try:
+            self.console.pop_theme()
+        except Exception:
+            pass
+        self.console.push_theme(_prose_rich_theme())
+        for prose in self.query(Prose):
+            prose.set_markdown(prose._src)
+        for row in self.query(TimelineRow):
+            row.retheme()
+        for body in self.query(ThoughtBody):
+            body.set_text(body._src)
+        for mark in self.query(WaitingMark):
+            mark._paint()
+        for row in self.query(HelpRow):
+            row.retheme()
+        try:
+            self.query_one("#blurb", Static).update(_splash_copy())
+        except Exception:
+            pass
+
+    def choose_model(self, value: str) -> None:
+        if self._theme_open:
+            self.choose_theme(value)
+            return
+        if not self._model_open:
+            return
+        self._model_id = self.loop.set_model(value)
+        self._hide_model_menu()
+        self._refresh_chrome()
+        self._hide_splash()
+        self._timeline().mount(TimelineRow(_mark(f"model  {self._model_id}"), classes="muted"))
+        self._scroll_follow()
+
     def action_abort_turn(self) -> None:
         menu = self._slash_menu()
         if menu.is_open:
             menu.close()
             self._sync_slash_suggestion()
+            return
+        if self._theme_open:
+            self._hide_theme_menu()
+            return
+        if self._model_open:
+            self._hide_model_menu()
             return
         if list(self.query(ResumePicker)):
             self.run_worker(self._resume_cancel(), exclusive=True, group="session")
@@ -2956,6 +3425,7 @@ class SparkTui(App):
         if callable(cancel):
             cancel()
         self._aborting = True
+        self._clear_activity()
         self._end_think()
         try:
             self.workers.cancel_group("turn")

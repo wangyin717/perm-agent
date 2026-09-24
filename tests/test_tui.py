@@ -83,6 +83,20 @@ async def _run() -> None:
         assert "Thought" in _thoughts(app)[0]
 
 
+def test_markdown_renders_under_night():
+    from agent_loop.cli import tui as tui_mod
+    from agent_loop.cli.theme import set_palette
+
+    tui_mod._MD_CACHE.clear()
+    set_palette("night")
+    try:
+        text = tui_mod._markdown_as_text("你好", 80)
+    finally:
+        set_palette("day")
+        tui_mod._MD_CACHE.clear()
+    assert "你好" in text.plain
+
+
 def test_markdown_body_uses_grokday_md_text():
     from agent_loop.cli import tui as tui_mod
 
@@ -185,6 +199,127 @@ def test_help_lists_one_command_per_row():
             assert app.query_one(HelpList)
             assert "Enter send" in str(app.query_one(".help-keys").content)
             assert list(app.query(Prose)) == []
+
+    asyncio.run(_run())
+
+
+def test_model_menu_is_one_list_and_marks_current():
+    from agent_loop.cli.tui import ModelOption
+    from agent_loop.llm.deepseek import DeepSeekLLM
+
+    async def _run() -> None:
+        app = SparkTui("model-menu", "/tmp/spark-agent-tui-model")
+        async with app.run_test(size=(90, 24)) as pilot:
+            app.loop._llm = DeepSeekLLM(api_key="sk-test")
+            await app._run_command("model", "/model")
+            await pilot.pause()
+            rows = list(app.query("#model-menu ModelOption"))
+            plains = [row.render().plain for row in rows]
+            assert [row.value for row in rows] == [
+                "deepseek-flash",
+                "deepseek-v4-pro",
+                "glm-5.3-flash",
+                "glm-5.3",
+            ]
+            assert plains[0].startswith("› ")
+            assert "deepseek-flash (current)" in plains[0]
+            assert "Fast. Reads images." in plains[0]
+            assert plains[1].startswith("  ")
+            assert "deepseek-v4-pro" in plains[1]
+            assert "(current)" not in plains[1]
+            assert "glm-5.3-flash" in plains[2]
+            assert "glm-5.3" in plains[3]
+            assert "(current)" not in plains[3]
+            await pilot.press("down")
+            await pilot.pause()
+            plains = [row.render().plain for row in app.query("#model-menu ModelOption")]
+            assert plains[0].startswith("  ")
+            assert "(current)" in plains[0]
+            assert plains[1].startswith("› ")
+            assert "(current)" not in plains[1]
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not app.query_one("#model-menu").has_class("-open")
+            await app._run_command("model", "/model")
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._model_id == "deepseek-v4-pro"
+            assert app.loop._llm.model == "deepseek-v4-pro"
+            assert app.loop._llm.supports_images is False
+            usage = str(app.query_one("#chrome-usage").content)
+            assert usage.startswith("deepseek-v4-pro | "), usage
+            assert list(app.query(ModelOption)) == []
+
+    asyncio.run(_run())
+
+
+def test_activity_line_above_the_prompt_tracks_wait_think_and_tool():
+    async def _run() -> None:
+        app = SparkTui("activity", "/tmp/spark-agent-tui-activity")
+        async with app.run_test(size=(80, 24)) as pilot:
+            app._busy = True
+            app._start_turn("hello")
+            app._show_llm_wait()
+            app._activity_t0 = __import__("time").monotonic() - 14
+            app._paint_activity()
+            await pilot.pause()
+            label = app.query_one("#activity")
+            assert label.has_class("-open")
+            assert str(label.content) == "waiting for response... 14s"
+            app._handle_event(
+                {"kind": "assistant_delta", "text": "想一下", "channel": "reasoning"}
+            )
+            app._think_t0 = __import__("time").monotonic() - 1.4
+            app._activity_t0 = app._think_t0
+            app._tick_think()
+            await pilot.pause()
+            assert str(app.query_one("#activity").content) == "thinking... 1.4s"
+            assert "1.4s" in str(app._thought.content)
+            assert label.region.y < app.query_one("#prompt-wrap").region.y
+            app._handle_event(
+                {"kind": "assistant_delta", "text": "想一下", "channel": "reasoning"}
+            )
+            await pilot.pause()
+            assert str(app.query_one("#activity").content).startswith("thinking...")
+            app._handle_event(
+                {"kind": "tool_start", "name": "browser_exec", "args": {"code": "page_info()"}}
+            )
+            await pilot.pause()
+            assert str(app.query_one("#activity").content).startswith("executing browser_exec...")
+            app._handle_event({"kind": "tool_result", "name": "browser_exec"})
+            await pilot.pause()
+            assert str(app.query_one("#activity").content).startswith("waiting for response...")
+            app._handle_event(
+                {"kind": "assistant_delta", "text": "好了", "channel": "content"}
+            )
+            await pilot.pause()
+            assert not app.query_one("#activity").has_class("-open")
+
+    asyncio.run(_run())
+
+
+def test_theme_command_switches_to_night():
+    async def _run() -> None:
+        from agent_loop.cli.theme import set_palette
+
+        app = SparkTui("theme", "/tmp/spark-agent-tui-theme")
+        async with app.run_test(size=(80, 24)) as pilot:
+            assert app.theme == "day"
+            await app._run_command("theme", "/theme")
+            await pilot.pause()
+            labels = [row.render().plain for row in app.query("#theme-menu ModelOption")]
+            assert labels[0].startswith("› ")
+            assert "day (current)" in labels[0]
+            assert "night" in labels[1]
+            await pilot.press("down")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.theme == "night"
+            assert app.get_css_variables()["page"] == "#0a0a0a"
+            assert not app.query_one("#theme-menu").has_class("-open")
+        set_palette("day")
 
     asyncio.run(_run())
 
@@ -521,8 +656,10 @@ def test_prose_key_text_is_blue():
                 return span.style.color.triplet
         return None
 
-    assert _color_at(bold_start) != blue
+    assert _color_at(bold_start) == (68, 68, 68)
     assert _color_at(code_start) == blue
+    h3 = rendered.plain.find("三个情景")
+    assert _color_at(h3) == (108, 62, 178)
 
 
 def test_prose_list_is_not_double_spaced():
@@ -564,6 +701,8 @@ def test_markdown_table_draws_box():
     assert "┌" in text and "┐" in text
     assert "│" in text
     assert text.count("├") >= 2
+    box_line = next(line for line in text.splitlines() if "┌" in line)
+    assert box_line.startswith("  ┌")
     assert "反抽" in text
     assert "45%" in text
 
@@ -576,6 +715,12 @@ def test_format_elapsed():
     assert format_elapsed(3723) == "1h2m3s"
     assert format_elapsed(0.4) == "0s"
     assert format_elapsed(0.6) == "1s"
+    from agent_loop.cli.tui import format_wait
+
+    assert format_wait(0.4) == "0.4s"
+    assert format_wait(9.9) == "9.9s"
+    assert format_wait(10) == "10s"
+    assert format_wait(14.8) == "14s"
     assert format_token_short(112_000) == "112K"
     assert format_token_short(1_000_000) == "1M"
     assert format_token_short(1_100_000) == "1.1M"
@@ -619,7 +764,7 @@ async def _summary() -> None:
         await pilot.pause()
         rows = [str(w.content) for w in app.query(TimelineRow)]
         blob = "\n".join(rows)
-        want = "Worked for 1m41s | deepseek-v4-flash | 112K / 1M | compacted microcompact 81% -> 42%"
+        want = "Worked for 1m41s | deepseek-flash | 112K / 1M | compacted microcompact 81% -> 42%"
         assert want in blob, blob
         assert want not in _status(app), _status(app)
 
@@ -913,7 +1058,7 @@ def test_approval_list_moves_with_the_keyboard():
             from agent_loop.cli.tui import ApprovalOption
 
             labels = [str(option.content) for option in app.query("#approval ApprovalOption")]
-            assert labels == ["Allow once", "Allow similar requests", "Deny"]
+            assert labels == ["Allow once", "yes, and always approve", "Deny"]
             assert app.query("#approval ApprovalOption")[0].has_class("-selected")
             mark = app.query_one("#approval WaitingMark")
             assert mark._timer is not None
@@ -932,7 +1077,8 @@ def test_approval_list_moves_with_the_keyboard():
             await pilot.pause()
             assert app._approval_future.done()
             assert app._approval_future.result() == "allow"
-            assert "bash:ls" in app._grants
+            assert app._approval_mode == "always-approve"
+            assert "always-approve" in str(app.query_one("#prompt-mode").content)
 
     asyncio.run(_run())
 

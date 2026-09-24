@@ -391,6 +391,44 @@ def test_tool_step_emits_the_full_sentence(tmp_path, monkeypatch):
     assert seen[assistant_at]["text"] == sentence
 
 
+def test_visible_turn_returns_before_memory_flush(tmp_path, monkeypatch):
+    from agent_loop import loop as loop_mod
+
+    monkeypatch.setattr("agent_loop.events.print_to_stdout", False)
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    async def slow_flush(*_args, **_kwargs):
+        started.set()
+        await gate.wait()
+
+    async def no_dream(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(loop_mod, "maybe_flush", slow_flush)
+    monkeypatch.setattr(loop_mod, "maybe_dream", no_dream)
+    llm = ScriptedLLM(
+        [LLMResponse(text="你好", tool_calls=[], stop_reason="end_turn")]
+    )
+    loop = ReactAgentLoop(FakeDeps(), None, None)
+    loop._llm = llm
+
+    async def run():
+        answer = await loop._run_loop(
+            "hi",
+            {**_uad(tmp_path), "install_sigint": False},
+            wait_for_memory=False,
+        )
+        assert answer == "你好"
+        assert not started.is_set()
+        await asyncio.sleep(0)
+        assert started.is_set()
+        gate.set()
+        await loop._memory_task
+
+    asyncio.run(run())
+
+
 def test_empty_end_turn_retries_then_answers(tmp_path, monkeypatch):
     from agent_loop import events
 

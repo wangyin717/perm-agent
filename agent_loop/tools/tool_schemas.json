@@ -123,7 +123,7 @@
     "type": "function",
     "function": {
       "name": "web_search",
-      "description": "Search the web for up-to-date information. Returns a ranked list of title, URL, and snippet. Prefer this over bash curl to search engines. If you need a specific page's full text, that is a later step — this tool only searches.",
+      "description": "Search the web. Returns a ranked list of title, URL, and snippet. Prefer this over bash curl. When the result header is [perplexity], answer from those snippets. If they are not enough, call web_search again with different keywords. Do not web_fetch those links to reread the same pages. When the header is [duckduckgo] or [duckduckgo fallback], snippets are short; use web_fetch only if one snippet is not enough to answer.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -144,7 +144,7 @@
     "type": "function",
     "function": {
       "name": "web_fetch",
-      "description": "Fetch a public http(s) URL. HTML becomes readable text; JSON and plain text stay as text. The full page is saved as UTF-8 under tools_result/web_fetch/: a `[web_fetch] url` header, then the body. It is not raw HTTP bytes and not guaranteed valid JSON. The tool result is a short preview plus the saved path — grep or read that path (set path= the file). Do not bash that file and do not json.load the whole file. Use when the user pastes a link or a search hit needs the page body. Fails for private/localhost URLs, login walls, PDFs, and JavaScript-only apps. Prefer this over bash curl.",
+      "description": "Fetch a public http(s) URL. HTML becomes readable text; JSON and plain text stay as text. The full page is saved as UTF-8 under tools_result/web_fetch/: a `[web_fetch] url` header, then the body. It is not raw HTTP bytes and not guaranteed valid JSON. The tool result is a short preview plus the saved path — grep or read that path (set path= the file). Do not bash that file and do not json.load the whole file. Use when the user pastes a link, or when a [duckduckgo] snippet is too short and that one page is required. Do not open links from a [perplexity] search; search again with new keywords instead. Fails for private/localhost URLs, login walls, PDFs, and JavaScript-only apps. Prefer this over bash curl.",
       "parameters": {
         "type": "object",
         "properties": {

@@ -92,6 +92,14 @@ def test_update_refreshes_official_plugin_files_and_keeps_the_rest(tmp_path, mon
     assert next(s for s in skills if s.name == "notes").path == note
 
 
+def test_trading_skill_is_bundled_for_stock_and_crypto_questions():
+    text = (bundled_skills_dir() / "stock-crypto-trading" / "SKILL.md").read_text(encoding="utf-8")
+    assert "name: stock-crypto-trading" in text
+    assert "stock or cryptocurrency" in text
+    assert "if-then" in text
+    assert "战役" not in text
+
+
 def test_official_pdf_skill_is_copied_and_refreshed(tmp_path, monkeypatch):
     monkeypatch.setenv("PERMANENT_HOME", str(tmp_path / "home"))
     home = tmp_path / "home"

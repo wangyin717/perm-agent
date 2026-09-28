@@ -378,7 +378,7 @@ Ctrl+C：`Abort` 打断退避和卡住的 POST（`RetryCancelledError`）。不�
 | write | 整文件；覆盖已有文件须先 read（见 §12）；新建不需要。`REPLAY=never`；缺目录 mkdir |
 | edit | 精确字符串替换；空 old 在 before_tool 拦住；须先 read（分页也算）；成功后 TUI 画红绿 hunk。`REPLAY=never` |
 | grep | 正则；第一页 20 条；完整命中写入 `tools_result/grep/<id>`；footer 带 cursor 则再调 grep 只传 cursor；无 `session_dir` 不写盘、不给 cursor |
-| web_search | `query`，可选 `max_results`（默认 5，上限 10）。有 `PERPLEXITY_API_KEY` 走 Search API；否则（或 401/429/5xx/超时）走 DuckDuckGo 子进程。结果带 `[perplexity]` / `[duckduckgo]` / `[duckduckgo fallback]`。snippet 仍进 jsonl |
+| web_search | `query`，可选 `max_results`（默认 5，上限 10）。有 `PERPLEXITY_API_KEY` 走 Search API；否则（或 401/429/5xx/超时）走 DuckDuckGo 子进程。结果带 `[perplexity]` / `[duckduckgo]` / `[duckduckgo fallback]`。`[perplexity]` 的摘要就是回答依据，不够就换关键词再搜，不要把那些链接逐个 `web_fetch`。DuckDuckGo 摘要短，不够时才打开其中一页。snippet 仍进 jsonl |
 | web_fetch | 一次一个公开 https URL；拦内网；跳转每次再检查。全文写入 `tools_result/web_fetch/<id>`（UTF-8 文本：一行 `[web_fetch] url` 头 + 正文，不是纯 JSON）。tool_result 只留路径、字数、约 30 行预览。找页内文字用 grep/read 且 `path=` 该文件；不要 bash / 整文件 `json.load` |
 | memory_search | 跨会话记忆。`query` 搜项目/中期/全局 md；`path` 读短名文件。不扫 jsonl |
 | bash | 本机命令。超过 **2000 行或 50KB（UTF-8 字节）** 先到先停：全文写入 `tools_result/bash/<id>.txt`，模型看到前 200 行 + 后 1800 行。无 session 只做头尾、注明没存文件。不要用来读改搜文件或搜网/拉页；不要自己 `| head` / `| tail` |

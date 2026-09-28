@@ -279,14 +279,16 @@ def test_activity_line_above_the_prompt_tracks_wait_think_and_tool():
             app._activity_t0 = app._think_t0
             app._tick_think()
             await pilot.pause()
-            assert str(app.query_one("#activity").content) == "thinking... 1.4s"
+            mark = str(app.query_one("#activity").content)
+            assert "thinking" not in mark.lower()
+            assert "◆" in mark
             assert "1.4s" in str(app._thought.content)
             assert label.region.y < app.query_one("#prompt-wrap").region.y
             app._handle_event(
                 {"kind": "assistant_delta", "text": "想一下", "channel": "reasoning"}
             )
             await pilot.pause()
-            assert str(app.query_one("#activity").content).startswith("thinking...")
+            assert "◆" in str(app.query_one("#activity").content)
             app._handle_event(
                 {"kind": "tool_start", "name": "browser_exec", "args": {"code": "page_info()"}}
             )
@@ -300,6 +302,76 @@ def test_activity_line_above_the_prompt_tracks_wait_think_and_tool():
             )
             await pilot.pause()
             assert not app.query_one("#activity").has_class("-open")
+
+    asyncio.run(_run())
+
+
+def test_apple_terminal_shift_enter_inserts_a_newline(tmp_path, monkeypatch):
+    monkeypatch.setenv("PERMANENT_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        "agent_loop.cli.tui.apple_terminal_newline_modifier_held",
+        lambda: True,
+    )
+
+    async def _run() -> None:
+        app = SparkTui("newline-apple", str(tmp_path / "ws"))
+        async with app.run_test(size=(80, 24)) as pilot:
+            prompt = app.query_one("#prompt")
+            prompt.focus()
+            await pilot.press("a")
+            await prompt.action_submit()
+            await pilot.pause()
+            assert prompt.value == "a\n"
+            assert app._pending_user is None
+
+    asyncio.run(_run())
+
+
+def test_shift_enter_inserts_a_newline(tmp_path, monkeypatch):
+    monkeypatch.setenv("PERMANENT_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+
+    async def _run() -> None:
+        app = SparkTui("newline", str(tmp_path / "ws"))
+        async with app.run_test(size=(80, 24)) as pilot:
+            prompt = app.query_one("#prompt")
+            prompt.focus()
+            await pilot.press("a", "shift+enter", "b", "ctrl+j", "c")
+            await pilot.pause()
+            assert prompt.value == "a\nb\nc"
+            assert prompt.parent.styles.height is not None
+
+    asyncio.run(_run())
+
+
+def test_up_recalls_the_previous_query(tmp_path, monkeypatch):
+    monkeypatch.setenv("PERMANENT_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+
+    async def _run() -> None:
+        app = SparkTui("hist", str(tmp_path / "ws"))
+        async with app.run_test(size=(80, 24)) as pilot:
+            prompt = app.query_one("#prompt")
+            prompt.focus()
+            app._remember_query("第一条")
+            app._remember_query("第二条")
+            prompt.value = "草稿"
+            await pilot.press("up")
+            await pilot.pause()
+            assert prompt.value == "第二条"
+            await pilot.press("up")
+            await pilot.pause()
+            assert prompt.value == "第一条"
+            await pilot.press("up")
+            await pilot.pause()
+            assert prompt.value == "第一条"
+            await pilot.press("down")
+            await pilot.pause()
+            assert prompt.value == "第二条"
+            await pilot.press("down")
+            await pilot.pause()
+            assert prompt.value == "草稿"
 
     asyncio.run(_run())
 

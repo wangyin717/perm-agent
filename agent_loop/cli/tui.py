@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
 import os
 import subprocess
@@ -408,8 +409,33 @@ def format_wait(seconds: float) -> str:
     return f"{int(seconds)}s"
 
 
+def apple_terminal_newline_modifier_held() -> bool:
+    """Mac 自带终端把 Shift+回车发成普通回车。本机按着 Shift、Option 或 Command 时改成换行。"""
+    if sys.platform != "darwin":
+        return False
+    if os.environ.get("TERM_PROGRAM") != "Apple_Terminal":
+        return False
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        return False
+    try:
+        core = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+        )
+        core.CGEventSourceFlagsState.argtypes = [ctypes.c_int]
+        core.CGEventSourceFlagsState.restype = ctypes.c_uint64
+        flags = core.CGEventSourceFlagsState(1)
+    except (OSError, AttributeError):
+        return False
+    return bool(flags & (0x00020000 | 0x00080000 | 0x00100000))
+
+
 def _thinking_line(dt: float) -> str:
     return _mark(f"[bold]Thinking[/][$muted]… {format_wait(dt)}[/]")
+
+
+def _think_mark(on: bool) -> str:
+    style = "$text" if on else "$faint"
+    return f"[{style}]◆[/]"
 
 
 def _thought_line(dt: float) -> str:
@@ -1273,6 +1299,11 @@ class PromptInput(Input):
 
     BINDINGS = [
         Binding("shift+tab", "toggle_approval_mode", show=False),
+        Binding(
+            "shift+enter,shift+return,ctrl+j,newline",
+            "insert_newline",
+            show=False,
+        ),
         Binding("tab", "slash_tab", show=False),
         Binding("up", "slash_up", show=False),
         Binding("down", "slash_down", show=False),
@@ -1341,6 +1372,98 @@ class PromptInput(Input):
         if callable(complete) and complete():
             return
 
+    def action_insert_newline(self) -> None:
+        if self.password:
+            return
+        if not self.selection.is_empty:
+            self._delete_span(*self.selection)
+        self.insert("\n", self.cursor_position)
+        self._fit_height()
+
+    def _line_col(self, index: int) -> tuple[int, int]:
+        text = self.value
+        index = max(0, min(index, len(text)))
+        line = text.count("\n", 0, index)
+        last_nl = text.rfind("\n", 0, index)
+        col = index if last_nl < 0 else index - last_nl - 1
+        return line, col
+
+    def _index_at(self, line: int, col: int) -> int:
+        lines = self.value.split("\n")
+        line = max(0, min(line, len(lines) - 1))
+        start = sum(len(lines[i]) + 1 for i in range(line))
+        return start + max(0, min(col, len(lines[line])))
+
+    def _move_cursor_line(self, direction: int) -> None:
+        lines = self.value.split("\n")
+        line, col = self._line_col(self.cursor_position)
+        nxt = line + direction
+        if nxt < 0 or nxt >= len(lines):
+            return
+        self.cursor_position = self._index_at(nxt, col)
+
+    def _fit_height(self) -> None:
+        lines = min(self.value.count("\n") + 1, 6)
+        self.styles.height = lines
+        parent = self.parent
+        if parent is not None and parent.id == "prompt-wrap":
+            parent.styles.height = lines + 2
+            parent.styles.align = ("left", "top") if lines > 1 else ("left", "middle")
+
+    def render_line(self, y: int):
+        from rich.text import Text
+        from textual.strip import Strip
+
+        if "\n" not in self.value:
+            return super().render_line(y)
+        lines = self.value.split("\n")
+        max_lines = 6
+        cursor_line, cursor_col = self._line_col(self.cursor_position)
+        start = 0
+        if len(lines) > max_lines:
+            start = max(0, min(cursor_line - max_lines + 1, len(lines) - max_lines))
+        vis = start + y
+        width = self.scrollable_content_region.width
+        if vis < 0 or vis >= len(lines):
+            return Strip.blank(self.size.width, self.rich_style)
+        result = Text(lines[vis], end="")
+        if self.has_focus and self._cursor_visible and vis == cursor_line:
+            cursor_style = self.get_component_rich_style("input--cursor")
+            if cursor_col >= len(lines[vis]):
+                result.append(" ")
+            result.stylize(cursor_style, cursor_col, cursor_col + 1)
+        segments = list(
+            self.app.console.render(
+                result,
+                self.app.console_options.update_width(max(width, result.cell_len + 1)),
+            )
+        )
+        strip = Strip(segments).crop(0, width).extend_cell_length(width)
+        return strip.apply_style(self.rich_style)
+
+    async def _on_mouse_down(self, event) -> None:
+        if "\n" not in self.value:
+            await super()._on_mouse_down(event)
+            return
+        from textual.widgets._input import Selection
+
+        self._pause_blink(visible=True)
+        offset_x, offset_y = event.get_content_offset_capture(self)
+        lines = self.value.split("\n")
+        max_lines = 6
+        cursor_line, _ = self._line_col(self.cursor_position)
+        start = 0
+        if len(lines) > max_lines:
+            start = max(0, min(cursor_line - max_lines + 1, len(lines) - max_lines))
+        line_i = min(max(start + int(offset_y), 0), len(lines) - 1)
+        col = min(max(int(offset_x), 0), len(lines[line_i]))
+        self.selection = Selection.cursor(self._index_at(line_i, col))
+        snapped = snap_cursor_out_of_chip(self.value, self.cursor_position)
+        if snapped != self.cursor_position:
+            self.cursor_position = snapped
+        self._selecting = True
+        self.capture_mouse()
+
     def action_slash_up(self) -> None:
         approve = getattr(self.app, "action_approval_move", None)
         if callable(approve) and approve(-1):
@@ -1357,6 +1480,12 @@ class PromptInput(Input):
         move = getattr(self.app, "move_slash", None)
         if callable(move) and move(-1):
             return
+        if "\n" in self.value[: self.cursor_position]:
+            self._move_cursor_line(-1)
+            return
+        recall = getattr(self.app, "recall_query", None)
+        if callable(recall):
+            recall(-1)
 
     def action_slash_down(self) -> None:
         approve = getattr(self.app, "action_approval_move", None)
@@ -1374,6 +1503,12 @@ class PromptInput(Input):
         move = getattr(self.app, "move_slash", None)
         if callable(move) and move(1):
             return
+        if "\n" in self.value[self.cursor_position :]:
+            self._move_cursor_line(1)
+            return
+        recall = getattr(self.app, "recall_query", None)
+        if callable(recall):
+            recall(1)
 
     async def action_submit(self) -> None:
         confirm = getattr(self.app, "action_approval_confirm", None)
@@ -1387,6 +1522,9 @@ class PromptInput(Input):
             return
         pick = getattr(self.app, "action_model_confirm", None)
         if callable(pick) and pick():
+            return
+        if not self.password and apple_terminal_newline_modifier_held():
+            self.action_insert_newline()
             return
         await super().action_submit()
 
@@ -2002,6 +2140,7 @@ class SparkTui(App):
         display: block;
         margin-bottom: 1;
     }
+
     #prompt-mode {
         height: 1;
         width: 100%;
@@ -2089,6 +2228,9 @@ class SparkTui(App):
 
         self.plugins = PluginHost()
         self.loop = ReactAgentLoop(CliDeps(), None, self.plugins)
+        self._query_history: List[str] = []
+        self._hist_index: Optional[int] = None
+        self._hist_draft = ""
         self._approval_mode = "auto"
         self._grants: set[str] = set()
         self._approval_future = None
@@ -2326,9 +2468,14 @@ class SparkTui(App):
             t0 = self._think_t0
         elapsed = format_wait(time.monotonic() - t0)
         try:
-            self.query_one("#activity", Static).update(f"{self._activity_label}... {elapsed}")
+            bar = self.query_one("#activity", Static)
         except Exception:
-            pass
+            return
+        if self._activity_kind == "think" and self._thought is not None:
+            on = int(time.monotonic() * 2) % 2 == 0
+            bar.update(_think_mark(on))
+            return
+        bar.update(f"{self._activity_label}... {elapsed}")
 
     def _show_llm_wait(self, *, restart: bool = False) -> None:
         self._set_activity("wait", "waiting for response", restart=restart)
@@ -2453,7 +2600,9 @@ class SparkTui(App):
             kind = row.get("kind")
             typ = row.get("type")
             if kind == "entry" and typ == "user":
-                self._start_turn(str(row.get("content") or ""))
+                content = str(row.get("content") or "")
+                self._remember_query(content)
+                self._start_turn(content)
             elif kind == "entry" and typ == "assistant":
                 text = str(row.get("content") or "").rstrip()
                 if text and self._turn is not None:
@@ -2702,6 +2851,9 @@ class SparkTui(App):
         self._prompt_value_seen = text
         self.sync_draft_images(text)
         self._refresh_slash_menu(text)
+        fit = getattr(event.input, "_fit_height", None)
+        if callable(fit):
+            fit()
 
     def attach_paste_text(self, text: str, *, replace_all: bool = False) -> bool:
         dropped = try_read_dropped_paths(text)
@@ -2793,6 +2945,7 @@ class SparkTui(App):
             self._hide_splash()
             self._timeline().mount(TimelineRow(_mark("unknown command. type /help"), classes="muted"))
             return
+        self._remember_query(text)
         media = self._take_submit_media(text)
         if self._busy:
             self._enqueue(text, media)
@@ -2804,6 +2957,41 @@ class SparkTui(App):
         self._start_turn(text)
         self._show_llm_wait()
         self.run_worker(self._run_turn(text, media), exclusive=True, group="turn")
+
+    def _remember_query(self, text: str) -> None:
+        text = (text or "").strip()
+        if not text:
+            return
+        self._query_history.append(text)
+        self._hist_index = None
+        self._hist_draft = ""
+
+    def _fill_prompt(self, text: str) -> None:
+        prompt = self.query_one("#prompt", PromptInput)
+        prompt.value = text
+        prompt.cursor_position = len(prompt.value)
+        self._prompt_value_seen = prompt.value
+
+    def recall_query(self, direction: int) -> bool:
+        """上键 direction=-1 取更早的一条，下键回到较新的，最后回到还没发出去的草稿。"""
+        hist = self._query_history
+        if not hist or direction == 0:
+            return False
+        if self._hist_index is None:
+            if direction > 0:
+                return False
+            self._hist_draft = self.query_one("#prompt", PromptInput).value
+            self._hist_index = len(hist)
+        nxt = self._hist_index + direction
+        if nxt < 0:
+            return True
+        if nxt >= len(hist):
+            self._hist_index = None
+            self._fill_prompt(self._hist_draft)
+            return True
+        self._hist_index = nxt
+        self._fill_prompt(hist[nxt])
+        return True
 
     def _queue_box(self) -> Vertical:
         return self.query_one("#queue", Vertical)
@@ -3067,6 +3255,9 @@ class SparkTui(App):
         self._aborting = False
         self._clear_activity()
         self._pending_user = None
+        self._query_history = []
+        self._hist_index = None
+        self._hist_draft = ""
         self._turn = None
         self._md = None
         self._stream_buf = ""

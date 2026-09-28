@@ -72,6 +72,7 @@ def test_schema_tells_model_not_to_bash_or_json_load():
     assert "json.load" in desc
     assert "Do not bash that file" in desc
     assert "[web_fetch] url" in desc
+    assert "Do not open links from a [perplexity] search" in desc
 
 
 def test_normalize_upgrades_http():

@@ -20,7 +20,7 @@
     "type": "function",
     "function": {
       "name": "read",
-      "description": "Read a file. Text files return the lines (offset 1-based, limit). A line-number prefix appears every 10 lines, as '    10|line'. Other lines are the raw text. pdf/docx/xlsx are extracted to text: short files return inline; long ones save under tools_result/read/ and return a preview — grep or read that saved path. Do not use bash to cat or parse these.",
+      "description": "Read a file. Text files return the lines (offset 1-based, limit). A line-number prefix appears every 10 lines, as '    10|line'. Other lines are the raw text. docx/xlsx are extracted to text: short files return inline; long ones save under tools_result/read/ and return a preview — grep or read that saved path. A .pdf is not extracted here: read the pdf skill and use bash. Do not use bash to cat or parse other files.",
       "parameters": {
         "type": "object",
         "properties": {

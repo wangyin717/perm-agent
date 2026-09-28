@@ -45,36 +45,13 @@ def load_manifest(pack: Path) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _is_factory_stub(path: Path) -> bool:
-    try:
-        head = path.read_text(encoding="utf-8")[:1200]
-    except OSError:
-        return False
-    return "placeholder" in head.lower()
-
-
 def ensure_user_plugins(home: Optional[Path] = None) -> Path:
-    """缺的才拷官方包到 ~/.permanent/plugins/，不覆盖用户已改的 SKILL.md。"""
+    """安装和 perm update 时盖掉官方插件的 SKILL.md 和 plugin.json。启动不调用。tools.md 留着。"""
     dest_root = user_plugins_dir(home)
     dest_root.mkdir(parents=True, exist_ok=True)
-    skills_root = spark_home(home) / "skills"
     for src in iter_official_packs():
         dest = dest_root / src.name
-        dest_md = dest / "SKILL.md"
-        if dest_md.is_file() and not _is_factory_stub(dest_md):
-            continue
-        legacy = skills_root / src.name / "SKILL.md"
-        if not dest_md.is_file() and legacy.is_file() and not _is_factory_stub(legacy):
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(legacy.parent, dest)
-            # 补上官方 plugin.json（旧 skills 目录没有）
-            if (src / "plugin.json").is_file() and not (dest / "plugin.json").is_file():
-                shutil.copy2(src / "plugin.json", dest / "plugin.json")
-            continue
-        if dest.exists():
-            shutil.rmtree(dest)
-        dest.mkdir(parents=True)
+        dest.mkdir(parents=True, exist_ok=True)
         for name in ("plugin.json", "SKILL.md"):
             piece = src / name
             if piece.is_file():

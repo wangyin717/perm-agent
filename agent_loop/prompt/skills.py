@@ -10,10 +10,7 @@ from typing import Dict, Iterable, List, Optional
 import yaml
 
 from agent_loop.paths import spark_home
-from agent_loop.plugins.pack import (
-    ensure_user_plugins,
-    user_plugins_dir,
-)
+from agent_loop.plugins.pack import user_plugins_dir
 
 _BUNDLED = Path(__file__).resolve().parent.parent / "bundled_skills"
 _FRONT = "---"
@@ -35,10 +32,7 @@ def user_skills_dir(home: Optional[Path] = None) -> Path:
 
 
 def ensure_user_skills(home: Optional[Path] = None) -> Path:
-    """Copy packaged skills into ~/.permanent/skills if that name is not there yet.
-
-    Does not overwrite a skill the user already has.
-    """
+    """安装和 perm update 时，把代码里的官方技能盖到 ~/.permanent/skills/。启动不调用。"""
     dest_root = user_skills_dir(home)
     dest_root.mkdir(parents=True, exist_ok=True)
     if not _BUNDLED.is_dir():
@@ -46,20 +40,27 @@ def ensure_user_skills(home: Optional[Path] = None) -> Path:
     for child in sorted(_BUNDLED.iterdir()):
         if not child.is_dir() or not (child / "SKILL.md").is_file():
             continue
-        dest = dest_root / child.name
-        dest_md = dest / "SKILL.md"
-        if dest_md.is_file() and not _is_factory_stub(dest_md):
-            continue
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(child, dest)
+        _copy_tree_files(child, dest_root / child.name)
     return dest_root
 
 
+def _copy_tree_files(src: Path, dest: Path) -> None:
+    """盖掉同名文件，不删除目标里多出来的文件。"""
+    dest.mkdir(parents=True, exist_ok=True)
+    for path in src.rglob("*"):
+        if not path.is_file():
+            continue
+        target = dest / path.relative_to(src)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
 def skill_roots(workspace: Path) -> List[Path]:
-    """家目录 skills、官方插件、项目覆盖。同名后者赢。"""
-    ensure_user_plugins()
-    ensure_user_skills()
+    """技能只读 ~/.permanent/skills。插件读 ~/.permanent/plugins。
+
+    不读代码里的 bundled_skills。官方技能要先由安装或 perm update 拷过去。
+    同名时，项目里的 .permanent 目录盖过家里的。
+    """
     root = Path(workspace).resolve()
     return [
         user_skills_dir(),
@@ -104,14 +105,6 @@ def format_skills_prompt(skills: List[Skill]) -> str:
         lines.append(f"- {skill.name}: {desc}")
         lines.append(f"  File: {skill.path.resolve().as_posix()}")
     return "\n".join(lines).rstrip()
-
-
-def _is_factory_stub(path: Path) -> bool:
-    try:
-        head = path.read_text(encoding="utf-8")[:1200]
-    except OSError:
-        return False
-    return "placeholder" in head.lower()
 
 
 def _parse_skill_md(path: Path) -> Optional[Skill]:

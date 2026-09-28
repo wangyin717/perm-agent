@@ -7,6 +7,9 @@ from agent_loop.prompt.assemble import _AGENTS_MAX_CHARS, build_system_prompt
 
 
 def test_includes_persona_cwd_and_date(tmp_path):
+    from agent_loop.plugins.pack import ensure_user_plugins
+
+    ensure_user_plugins()
     text = build_system_prompt(str(tmp_path), today=date(2026, 9, 10))
     assert "Permanent" in text
     assert "# Tool notes" in text

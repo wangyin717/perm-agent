@@ -1,4 +1,6 @@
-"""读文本文件；pdf/docx/xlsx 抽成文本。短的内联，长的落盘再 grep。
+"""读文本文件；docx/xlsx 抽成文本。短的内联，长的落盘再 grep。
+
+PDF 不在这里抽文字。read 只告诉模型去读 pdf 技能，再用 bash 抽。
 
 图片（jpeg/png/gif/webp）按文件头识别，jsonl 只记路径；发给模型时再编码。
 """
@@ -70,6 +72,8 @@ async def execute(
         raise FileNotFoundError(f"file not found: {path}")
     if file_path.is_dir():
         raise IsADirectoryError(f"is a directory: {path}")
+    if file_path.suffix.lower() == ".pdf":
+        return _pdf_pointer(file_path)
     data = file_path.read_bytes()
     sniffed = sniff_image(data)
     if sniffed is not None:
@@ -146,17 +150,12 @@ def _stub(name: str, saved: str, full: str) -> str:
     )
 
 
-def _extract_pdf(file_path: Path) -> str:
-    from pypdf import PdfReader
-
-    reader = PdfReader(str(file_path))
-    parts = []
-    for i, page in enumerate(reader.pages, 1):
-        text = (page.extract_text() or "").strip()
-        if not text:
-            continue
-        parts.append(f"--- page {i} ---\n{text}")
-    return "\n\n".join(parts)
+def _pdf_pointer(file_path: Path) -> str:
+    return (
+        f"[pdf] {file_path}\n"
+        "The read tool does not extract PDF text.\n"
+        "Read the pdf skill's SKILL.md, then extract this file with bash."
+    )
 
 
 def _extract_docx(file_path: Path) -> str:
@@ -189,7 +188,6 @@ def _extract_xlsx(file_path: Path) -> str:
 
 
 EXTRACTORS: Dict[str, Callable[[Path], str]] = {
-    ".pdf": _extract_pdf,
     ".docx": _extract_docx,
     ".xlsx": _extract_xlsx,
 }

@@ -80,34 +80,32 @@ def test_read_offset_beyond_end(tmp_path):
         asyncio.run(execute({"path": "a.txt", "offset": 9}, workspace=str(tmp_path)))
 
 
-def test_short_pdf_returns_inline(tmp_path, monkeypatch):
-    from agent_loop.tools import read_tool
-
-    monkeypatch.setitem(read_tool.EXTRACTORS, ".pdf", lambda _p: "Invoice UZR2GULN $100")
-    (tmp_path / "inv.pdf").write_bytes(b"%PDF-\x00fake")
+def test_pdf_points_at_the_skill(tmp_path):
+    (tmp_path / "inv.pdf").write_bytes(b"%PDF-1.4\n")
     out = asyncio.run(execute({"path": "inv.pdf"}, workspace=str(tmp_path)))
-    assert "Invoice UZR2GULN $100" in out
-    assert "[pdf] inv.pdf" in out
-    assert "|" not in out.split("Showing lines", 1)[0]
+    assert "[pdf]" in out
+    assert "does not extract PDF text" in out
+    assert "SKILL.md" in out
+    assert "bash" in out
     assert "saved:" not in out
 
 
-def test_long_pdf_spills_to_session(tmp_path, monkeypatch):
+def test_long_docx_extract_spills_to_session(tmp_path, monkeypatch):
     from agent_loop.tools import read_tool
 
-    body = ("lorem ipsum dolor sit amet\n" * 400)
-    assert len(f"[pdf] big.pdf\n\n{body}") > read_tool.SPILL_CHARS
-    monkeypatch.setitem(read_tool.EXTRACTORS, ".pdf", lambda _p: body)
-    (tmp_path / "big.pdf").write_bytes(b"%PDF-\x00fake")
+    body = "lorem ipsum dolor sit amet\n" * 400
+    assert len(f"[docx] big.docx\n\n{body}") > read_tool.SPILL_CHARS
+    monkeypatch.setitem(read_tool.EXTRACTORS, ".docx", lambda _p: body)
+    (tmp_path / "big.docx").write_bytes(b"PK\x00fake")
     session = tmp_path / "chat"
     out = asyncio.run(
         execute(
-            {"path": "big.pdf"},
+            {"path": "big.docx"},
             workspace=str(tmp_path),
             session_dir=str(session),
         )
     )
-    assert "[read] big.pdf" in out
+    assert "[read] big.docx" in out
     assert "saved:" in out
     assert "chars:" in out
     assert "grep or read the saved path" in out
@@ -120,26 +118,15 @@ def test_long_pdf_spills_to_session(tmp_path, monkeypatch):
     assert body.strip() in text
 
 
-def test_long_pdf_without_session_paginates(tmp_path, monkeypatch):
+def test_long_extract_without_session_paginates(tmp_path, monkeypatch):
     from agent_loop.tools import read_tool
 
     body = "row\n" * 5000
-    monkeypatch.setitem(read_tool.EXTRACTORS, ".pdf", lambda _p: body)
-    (tmp_path / "big.pdf").write_bytes(b"%PDF-fake")
-    out = asyncio.run(execute({"path": "big.pdf"}, workspace=str(tmp_path)))
+    monkeypatch.setitem(read_tool.EXTRACTORS, ".docx", lambda _p: body)
+    (tmp_path / "big.docx").write_bytes(b"PK fake")
+    out = asyncio.run(execute({"path": "big.docx"}, workspace=str(tmp_path)))
     assert "saved:" not in out
     assert "Use offset=" in out
-
-
-def test_empty_pdf_errors(tmp_path):
-    from pypdf import PdfWriter
-
-    blank = tmp_path / "blank.pdf"
-    writer = PdfWriter()
-    writer.add_blank_page(width=72, height=72)
-    writer.write(blank)
-    with pytest.raises(ValueError, match="no extractable text"):
-        asyncio.run(execute({"path": "blank.pdf"}, workspace=str(tmp_path)))
 
 
 def test_docx_extracts_paragraphs(tmp_path):

@@ -824,9 +824,9 @@ def render_computer_tools_md(tools: List[Dict[str, Any]]) -> str:
 
 
 def _write_computer_catalog(tools: List[Dict[str, Any]]) -> Path:
-    from agent_loop.plugins.pack import ensure_user_plugins
+    from agent_loop.plugins.pack import user_plugins_dir
 
-    dest = ensure_user_plugins() / "computer-use"
+    dest = user_plugins_dir() / "computer-use"
     dest.mkdir(parents=True, exist_ok=True)
     path = dest / "tools.md"
     path.write_text(render_computer_tools_md(tools), encoding="utf-8")

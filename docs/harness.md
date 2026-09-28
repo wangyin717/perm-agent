@@ -66,7 +66,7 @@ yaml 行为稿
 + Today's date
 ```
 
-参数、用法写在 schema。yaml 只留人设和「重叠工具怎么选」。skill 名单由 `prompt/skills.py` 扫描后接在 tool_notes 和 AGENTS.md 之间。出厂 skill 若还有，在 `bundled_skills/`，缺的才拷到 `~/.permanent/skills/`。官方 **browser-use 插件**在包内 `plugins/browser-use/`（`SKILL.md` + `plugin.json`），缺的才拷到 `~/.permanent/plugins/browser-use/`。system 里的 `File:` 指向家目录这份，再用 `read`。仓库 `.permanent/skills/` 或 `.permanent/plugins/` 同名覆盖。插件默认开（`config.json` 里 `plugins.browser-use`）。开 TUI 即起 `browser-use --cli-mcp`，把 `browser_exec` / `browser_screenshot` 放进这次 `llm.call` 的 schema。连不上时同一条 `browser_exec` 打开检查页并等 Allow，点完自动继续。
+参数、用法写在 schema。yaml 只留人设和「重叠工具怎么选」。skill 名单由 `prompt/skills.py` 扫描后接在 tool_notes 和 AGENTS.md 之间。拼进系统提示的 skill 只读 `~/.permanent/skills/`，不读代码里的 `bundled_skills/`。官方 skill 从 `bundled_skills/` 盖到 `~/.permanent/skills/`，只在安装和 `perm update` 时按代码里的那份重写同名目录，启动不盖。其它用户自建技能留着。browser-use 与 computer-use 同样只在这时重写 `SKILL.md` 和 `plugin.json`，`computer-use/tools.md` 不盖。仓库 `.permanent/skills/` 或 `.permanent/plugins/` 同名再覆盖。插件默认开（`config.json` 里 `plugins.browser-use`）。开 TUI 即起 `browser-use --cli-mcp`，把 `browser_exec` / `browser_screenshot` 放进这次 `llm.call` 的 schema。连不上时同一条 `browser_exec` 打开检查页并等 Allow，点完自动继续。
 
 ---
 
@@ -374,7 +374,7 @@ Ctrl+C：`Abort` 打断退避和卡住的 POST（`RetryCancelledError`）。不�
 
 | 工具 | 要点 |
 |---|---|
-| read | 文本：`offset`（1-based）/`limit`，默认最多 1000 行或 10 万字节，footer 写下一页 `offset`。pdf/docx/xlsx 抽成文本（≤8k 内联，更长落盘）。jpeg/png/gif/webp 按文件头识别，jsonl 只记 `media.path`，并写一条不含像素的 `image_attached` record。投影时 tool 仍是文字，图挂在紧挨着的 `user`（DeepSeek 只允许 user 带图）。模型无视觉则 Pi 式省略说明。`REPLAY=safe` |
+| read | 文本：`offset`（1-based）/`limit`，默认最多 1000 行或 10 万字节，footer 写下一页 `offset`。docx/xlsx 抽成文本（≤8k 内联，更长落盘）。`.pdf` 不抽文字，只指向 pdf 技能，由 `bash` 按技能抽。jpeg/png/gif/webp 按文件头识别，jsonl 只记 `media.path`，并写一条不含像素的 `image_attached` record。投影时 tool 仍是文字，图挂在紧挨着的 `user`（DeepSeek 只允许 user 带图）。模型无视觉则 Pi 式省略说明。`REPLAY=safe` |
 | write | 整文件；覆盖已有文件须先 read（见 §12）；新建不需要。`REPLAY=never`；缺目录 mkdir |
 | edit | 精确字符串替换；空 old 在 before_tool 拦住；须先 read（分页也算）；成功后 TUI 画红绿 hunk。`REPLAY=never` |
 | grep | 正则；第一页 20 条；完整命中写入 `tools_result/grep/<id>`；footer 带 cursor 则再调 grep 只传 cursor；无 `session_dir` 不写盘、不给 cursor |
@@ -387,7 +387,7 @@ web_search 的 DuckDuckGo 在独立子进程里跑 `ddgs`，30 秒杀不掉就 S
 
 UTF-8 字节是通用编码体积，不是中文专用：`len(s.encode("utf-8"))`。中文同等字符数会先碰到 50KB。
 
-附件：文字型 pdf/docx/xlsx 走 `read` 抽取。jpeg/png/gif/webp 走 `read` 的图像路径（jsonl 不存 base64）。扫描 PDF、音视频仍不行。
+附件：docx/xlsx 走 `read` 抽取。PDF 走 pdf 技能和 `bash`（库在 `~/.permanent/pdf-venv`，不进 perm 自己的环境）。jpeg/png/gif/webp 走 `read` 的图像路径（jsonl 不存 base64）。音视频仍不行。
 
 ---
 
@@ -410,7 +410,8 @@ UTF-8 字节是通用编码体积，不是中文专用：`len(s.encode("utf-8"))
 |---|---|---|
 | read 文本 | execute 按行切页 | `offset=N` |
 | grep | execute 写命中快照 | `cursor=` |
-| 长 pdf/docx/xlsx | execute 抽完 >8k 落盘 | grep/read 那个 txt |
+| 长 docx/xlsx | execute 抽完 >8k 落盘 | grep/read 那个 txt |
+| PDF | read 不抽 | 按 pdf 技能用 bash |
 | web_fetch | execute 默认落盘 | 同上 |
 | bash | execute 行数或字节超限落盘 | grep/read 那个 txt；预览是头尾 |
 
@@ -429,7 +430,7 @@ Pi / OpenCode / Grok / Hermes 对 bash 几乎都是：**头或尾的预览 + 全
 **先读再改**（学 Claude 的硬门，不学「必须读完全文」）：
 
 - `ToolRuntime` 内存表：`绝对路径 → {content, mtime}`。不写文件系统。
-- 成功 `read`（整份或 offset 翻页都算）记下快照。pdf/docx/xlsx 抽取 **不记账**。
+- 成功 `read`（整份或 offset 翻页都算）记下快照。docx/xlsx 抽取 **不记账**。`.pdf` 的提示也不记账。
 - `edit`、覆盖**已有文件**的 `write`：从没 read、或磁盘相对上次读 **mtime 且内容都变了** → 失败并写明原因。只变 mtime、内容相同则放行并刷新 timestamp。
 - **新建** write 不需要先 read；写成功后记账，紧接着 edit 不用再读。
 - edit/write 成功立刻用新内容和新 mtime 覆盖记录，同一轮可以连改。

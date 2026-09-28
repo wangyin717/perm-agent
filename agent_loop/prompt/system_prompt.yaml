@@ -42,6 +42,8 @@ tool_notes:
   bash: |
     Prefer specialized tools over bash when they can do the job.
     Do not use bash to read, edit, grep, search, or fetch the web.
+    PDF text is the exception: the read tool does not extract it.
+    Follow the pdf skill and use bash.
 
     To find a file by name: look in the workspace, then Desktop, Downloads,
     and Documents. On macOS use `mdfind -name`. Never `find $HOME` or

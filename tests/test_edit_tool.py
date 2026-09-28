@@ -282,10 +282,7 @@ def test_overwrite_without_read_is_rejected(tmp_path):
     assert (tmp_path / "a.py").read_text(encoding="utf-8") == "old\n"
 
 
-def test_pdf_read_does_not_unlock_edit(tmp_path, monkeypatch):
-    from agent_loop.tools import read_tool
-
-    monkeypatch.setitem(read_tool.EXTRACTORS, ".pdf", lambda _p: "Invoice")
+def test_pdf_read_does_not_unlock_edit(tmp_path):
     (tmp_path / "inv.pdf").write_bytes(b"%PDF-\x00fake")
     runtime = ToolRuntime()
     runtime.workspace = str(tmp_path)

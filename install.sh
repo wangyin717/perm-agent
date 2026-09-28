@@ -1,7 +1,7 @@
 #!/bin/bash
 # Permanent installer. Usage:
 #   curl -fsSL https://raw.githubusercontent.com/wangyin717/perm-agent/main/install.sh | bash
-#   curl … | bash -s -- --ref v0.4.0
+#   curl … | bash -s -- --ref v0.5.0
 #   curl … | bash -s -- --non-interactive
 set -euo pipefail
 
@@ -179,24 +179,29 @@ ensure_path() {
 }
 
 copy_skills() {
-  local src="$SRC/agent_loop/bundled_skills"
-  local dest="$PERMANENT_HOME/skills"
-  mkdir -p "$dest"
-  if [ ! -d "$src" ]; then
-    return 0
-  fi
+  # 只盖官方同名技能和这两个插件的说明。用户自己加的目录留着。
+  # computer-use/tools.md 是运行时写的，这里不碰。
+  local bundled="$SRC/agent_loop/bundled_skills"
+  local plugs="$SRC/agent_loop/plugins"
+  mkdir -p "$PERMANENT_HOME/skills" "$PERMANENT_HOME/plugins"
   local d name
-  for d in "$src"/*/; do
-    [ -d "$d" ] || continue
-    name="$(basename "$d")"
-    if [ -f "$dest/$name/SKILL.md" ] \
-        && ! grep -qi placeholder "$dest/$name/SKILL.md"; then
-      continue
-    fi
-    rm -rf "$dest/$name"
-    cp -R "$d" "$dest/$name"
-  done
-  ok "skills $dest"
+  if [ -d "$bundled" ]; then
+    for d in "$bundled"/*/; do
+      [ -f "$d/SKILL.md" ] || continue
+      name="$(basename "$d")"
+      mkdir -p "$PERMANENT_HOME/skills/$name"
+      cp -R "$d"/. "$PERMANENT_HOME/skills/$name"/
+    done
+  fi
+  if [ -d "$plugs" ]; then
+    for d in "$plugs"/*/; do
+      [ -f "$d/plugin.json" ] || continue
+      name="$(basename "$d")"
+      mkdir -p "$PERMANENT_HOME/plugins/$name"
+      [ -f "$d/SKILL.md" ] && cp "$d/SKILL.md" "$PERMANENT_HOME/plugins/$name/SKILL.md"
+      cp "$d/plugin.json" "$PERMANENT_HOME/plugins/$name/plugin.json"
+    done
+  fi
 }
 
 install_browser_use() {

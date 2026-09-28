@@ -1,4 +1,4 @@
-"""从 .env 读入环境变量。已存在的 os.environ 不覆盖。"""
+"""从 ~/.permanent/.env 读入环境变量。不读当前目录或仓库里的 .env。已存在的 os.environ 不覆盖。"""
 
 from __future__ import annotations
 
@@ -25,9 +25,6 @@ def load_dotenv() -> None:
 def _candidate_paths():
     from agent_loop.paths import spark_home
 
-    yield Path.cwd() / ".env"
-    # agent_loop/envfile.py → 仓库根
-    yield Path(__file__).resolve().parent.parent / ".env"
     yield spark_home() / ".env"
 
 
@@ -45,5 +42,6 @@ def _apply(path: Path) -> None:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        if key and key not in os.environ:
+        # 空的 KEY= 不算已经配置，后面的 .env 还可以补上。
+        if key and value and not (os.environ.get(key) or "").strip():
             os.environ[key] = value

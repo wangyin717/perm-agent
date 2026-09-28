@@ -213,6 +213,106 @@ def test_tui_paste_absolute_png_inserts_chip(tmp_path, monkeypatch):
     asyncio.run(_run())
 
 
+def test_drop_onto_the_timeline_still_attaches(tmp_path, monkeypatch):
+    """拖到对话区域时，焦点不在输入框，终端仍会把路径当成一次粘贴送来。"""
+    from textual.events import Paste
+
+    from agent_loop.cli.tui import SparkTui
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    png = tmp_path / "shot.png"
+    png.write_bytes(_min_png())
+
+    async def _run() -> None:
+        app = SparkTui("drop-timeline", str(ws))
+        async with app.run_test(size=(80, 24)) as pilot:
+            prompt = app.query_one("#prompt")
+            prompt.value = "看看这个"
+            app.query_one("#timeline").focus()
+            await pilot.pause()
+            assert app.focused.id != "prompt"
+            app.post_message(Paste(str(png)))
+            await pilot.pause()
+            assert "[Image #1]" in prompt.value
+            assert "看看这个" in prompt.value
+            assert str(png) not in prompt.value
+            assert len(app._draft_images) == 1
+
+    asyncio.run(_run())
+
+
+def test_dropped_image_is_not_selected_and_has_a_trailing_space(tmp_path, monkeypatch):
+    from textual.events import Paste
+
+    from agent_loop.cli.tui import SparkTui
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    png = tmp_path / "shot.png"
+    png.write_bytes(_min_png())
+
+    async def _run() -> None:
+        app = SparkTui("drop-space", str(ws))
+        async with app.run_test(size=(80, 24)) as pilot:
+            prompt = app.query_one("#prompt")
+            app.query_one("#timeline").focus()
+            await pilot.pause()
+            app.post_message(Paste(str(png)))
+            await pilot.pause()
+            await pilot.pause()
+            assert app.focused is prompt
+            await pilot.click("#timeline")
+            await pilot.pause()
+            assert app.focused is prompt
+            assert prompt.value == "[Image #1] "
+            assert prompt.selection.is_empty
+            assert prompt.cursor_position == len(prompt.value)
+            await pilot.press("space")
+            await pilot.pause()
+            assert "[Image #1]" in prompt.value
+            assert len(app._draft_images) == 1
+
+    asyncio.run(_run())
+
+
+def test_drop_puts_the_cursor_in_the_prompt_even_if_the_window_blurred(tmp_path, monkeypatch):
+    """从访达拖进来时，终端会先失焦。图片落下后光标必须已经在输入框里。"""
+    from textual.events import AppBlur, Paste
+
+    from agent_loop.cli.tui import SparkTui
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    png = tmp_path / "shot.png"
+    png.write_bytes(_min_png())
+
+    async def _run() -> None:
+        app = SparkTui("drop-focus", str(ws))
+        async with app.run_test(size=(80, 24)) as pilot:
+            prompt = app.query_one("#prompt")
+            app.query_one("#timeline").focus()
+            await pilot.pause()
+            await app._on_app_blur(AppBlur())
+            await app.on_event(Paste(str(png)))
+            app.app_focus = True
+            assert app.focused is prompt
+            await pilot.press("z")
+            await pilot.pause()
+            assert prompt.value == "[Image #1] z"
+
+    asyncio.run(_run())
+
+
 def test_tui_typed_quoted_path_becomes_chip(tmp_path, monkeypatch):
     """拖文件进终端通常不是 Paste，只是把带引号的路径写进输入框。"""
     from agent_loop.cli.tui import SparkTui
@@ -256,8 +356,12 @@ def test_tui_backspace_deletes_whole_chip(tmp_path, monkeypatch):
             assert app.attach_paste_text(str(png))
             await pilot.pause()
             assert prompt.value.strip() == "[Image #1]"
+            assert prompt.value.endswith(" ")
             assert app._draft_images
             prompt.action_end()
+            prompt.action_delete_left()
+            await pilot.pause()
+            assert prompt.value.strip() == "[Image #1]"
             prompt.action_delete_left()
             await pilot.pause()
             assert "[Image #1]" not in prompt.value

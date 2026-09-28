@@ -16,6 +16,7 @@ from agent_loop.abort import Abort, RetryCancelledError
 
 API_BASE = "https://api.deepseek.com"
 ZHIPU_API_BASE = "https://open.bigmodel.cn/api/paas/v4"
+KIMI_API_BASE = "https://api.moonshot.cn/v1"
 # 文档上的调用名。旧名 deepseek-v4-flash 仍会打到 Flash，这里收成新名。
 # 每一项是 (调用名, 菜单上的名字, 一行说明)。再加模型就加一行。
 MODEL = "deepseek-flash"
@@ -24,6 +25,8 @@ MODEL_CHOICES = (
     ("deepseek-v4-pro", "deepseek-v4-pro", "Stronger. No images."),
     ("glm-5.3-flash", "glm-5.3-flash", "Zhipu. Reads images."),
     ("glm-5.3", "glm-5.3", "Zhipu flagship. No images."),
+    ("kimi-k3", "kimi-k3", "Kimi flagship. Reads images."),
+    ("kimi-k2.7-code", "kimi-k2.7-code", "Kimi coding. Reads images."),
 )
 MODEL_ALIASES = {
     "deepseek-v4-flash": "deepseek-flash",
@@ -36,6 +39,8 @@ CONTEXT_WINDOWS = {
     "deepseek-v4-pro": 1_000_000,
     "glm-5.3-flash": 1_000_000,
     "glm-5.3": 1_000_000,
+    "kimi-k3": 1_000_000,
+    "kimi-k2.7-code": 256_000,
 }
 DEFAULT_CONTEXT_WINDOW = 1_000_000
 # pro 不支持图像。旧 vision-exp 由 Flash 承接。
@@ -44,30 +49,43 @@ VISION_MODELS = {
     "deepseek-v4-flash",
     "deepseek-v4-flash-vision-exp",
     "glm-5.3-flash",
+    "kimi-k3",
+    "kimi-k2.7-code",
 }
 
 
 def provider_of(model_id: str) -> str:
-    if (model_id or "").startswith("glm-"):
+    name = (model_id or "").strip().lower()
+    if name.startswith("glm-"):
         return "zhipu"
+    if name.startswith("kimi-"):
+        return "kimi"
     return "deepseek"
 
 
+def env_name_for(model_id: str) -> str:
+    provider = provider_of(model_id)
+    if provider == "zhipu":
+        return "ZHIPU_API_KEY"
+    if provider == "kimi":
+        return "MOONSHOT_API_KEY"
+    return "DEEPSEEK_API_KEY"
+
+
 def api_base_for(model_id: str) -> str:
-    if provider_of(model_id) == "zhipu":
+    provider = provider_of(model_id)
+    if provider == "zhipu":
         return ZHIPU_API_BASE
+    if provider == "kimi":
+        return KIMI_API_BASE
     return API_BASE
 
 
 def api_key_for(model_id: str) -> str:
-    if provider_of(model_id) == "zhipu":
-        key = (os.environ.get("ZHIPU_API_KEY") or "").strip()
-        if not key:
-            raise RuntimeError("ZHIPU_API_KEY is not set (put it in .env)")
-        return key
-    key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    env_name = env_name_for(model_id)
+    key = (os.environ.get(env_name) or "").strip()
     if not key:
-        raise RuntimeError("DEEPSEEK_API_KEY is not set (put it in .env)")
+        raise RuntimeError(f"{env_name} is not set (put it in ~/.permanent/.env)")
     return key
 
 
@@ -201,8 +219,7 @@ class DeepSeekLLM:
         self.model = canonical_model(model) if model else MODEL
         self.api_key = (api_key or api_key_for(self.model)).strip()
         if not self.api_key:
-            env_name = "ZHIPU_API_KEY" if provider_of(self.model) == "zhipu" else "DEEPSEEK_API_KEY"
-            raise RuntimeError(f"{env_name} is not set (put it in .env)")
+            raise RuntimeError(f"{env_name_for(self.model)} is not set (put it in ~/.permanent/.env)")
         self.api_base = (api_base or api_base_for(self.model)).rstrip("/")
         self.timeout = timeout
         self.context_window = CONTEXT_WINDOWS.get(self.model, DEFAULT_CONTEXT_WINDOW)
@@ -243,6 +260,16 @@ class DeepSeekLLM:
             payload["reasoning_effort"] = effort or "max"
             if tools:
                 payload["tool_stream"] = True
+        elif provider_of(self.model) == "kimi":
+            # 不要传 temperature / top_p。Kimi 这些值是固定的，传了会报错。
+            # K3 的思考关不掉，限长摘要用 low。K2.7 Code 只用默认思考，不传 reasoning_effort。
+            if self.model == "kimi-k3":
+                effort = kwargs.get("reasoning_effort")
+                if effort is None and kwargs.get("max_tokens") is not None:
+                    effort = "low"
+                payload["reasoning_effort"] = effort or "max"
+            if tools:
+                payload["tool_choice"] = "auto"
         else:
             payload["stream_options"] = {"include_usage": True}
             if tools:

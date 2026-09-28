@@ -5,7 +5,7 @@
 
 加工具：写 `execute` + `REPLAY` + `READ_ONLY` + 自己的 hooks，登记进 `TOOLS`，不必改循环。增删工具只改 registry + schema；人设里的工具注意事项按启用工具再拼，不要在 yaml 里抄参数表。
 
-密钥：仓库根 `.env` 或 `~/.permanent/.env`（`DEEPSEEK_API_KEY`、`ZHIPU_API_KEY`、`PERPLEXITY_API_KEY`，Jev 用 `TYPESAFE_API_KEY`），启动时 `envfile.load_dotenv()` 读入；已有环境变量不覆盖。`.env` 不进 git，`.env.example` 只有变量名。Jev 三处见 `docs/jev.md`。开发入口：`uv sync && uv run perm`。对外安装：`install.sh` 把代码和 venv 放到 `~/.permanent/src`，uv 管理的 Python 在 `~/.permanent/python`，browser-use 的隔离环境在 `~/.permanent/uv-tools`，命令是 `perm`（包装脚本会把 `~/.permanent/bin` 加进 PATH）；`perm update` 换到新的 `v*` tag。只有这份托管安装才在启动时检查新 tag。
+密钥只从 `~/.permanent/.env` 读（`DEEPSEEK_API_KEY`、`ZHIPU_API_KEY`、`MOONSHOT_API_KEY`、`PERPLEXITY_API_KEY`，Jev 用 `TYPESAFE_API_KEY`）。不读当前目录或仓库根的 `.env`。启动时 `envfile.load_dotenv()` 读入；进程里已经有的环境变量不覆盖。`.env` 不进 git，`.env.example` 只有变量名。Jev 三处见 `docs/jev.md`。开发入口：`uv sync && uv run perm`。对外安装：`install.sh` 把代码和 venv 放到 `~/.permanent/src`，uv 管理的 Python 在 `~/.permanent/python`，browser-use 的隔离环境在 `~/.permanent/uv-tools`，命令是 `perm`（包装脚本会把 `~/.permanent/bin` 加进 PATH）；`perm update` 换到新的 `v*` tag。只有这份托管安装才在启动时检查新 tag。
 
 跨会话 memory 见 §4。
 

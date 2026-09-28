@@ -31,15 +31,30 @@ def test_read_outside_workspace(tmp_path):
     out = asyncio.run(
         execute({"path": str(other / "ref.py")}, workspace=str(workspace))
     )
-    assert "     1|x = 1" in out
+    assert "x = 1" in out
+    assert "|" not in out.split("Showing lines", 1)[0]
 
 
-def test_read_numbers_lines(tmp_path):
-    _write(tmp_path, "a.py", "import os\ndef main():\n    pass\n")
+def test_read_numbers_every_tenth_line(tmp_path):
+    lines = [f"line-{i}" for i in range(1, 13)]
+    _write(tmp_path, "a.py", "\n".join(lines) + "\n")
     out = asyncio.run(execute({"path": "a.py"}, workspace=str(tmp_path)))
-    assert "     1|import os" in out
-    assert "     2|def main():" in out
-    assert "Showing lines 1-3 of 3" in out
+    assert "line-1" in out
+    assert "     1|line-1" not in out
+    assert "     9|line-9" not in out
+    assert "    10|line-10" in out
+    assert "line-11" in out
+    assert "    11|line-11" not in out
+    assert "Showing lines 1-12 of 12" in out
+    longer = [f"L{i}" for i in range(1, 25)]
+    _write(tmp_path, "b.py", "\n".join(longer) + "\n")
+    window = asyncio.run(
+        execute({"path": "b.py", "offset": 15, "limit": 8}, workspace=str(tmp_path))
+    )
+    assert "    20|L20" in window
+    assert "L15" in window
+    assert "    15|L15" not in window
+    assert "Showing lines 15-22 of 24" in window
 
 
 def test_read_offset_limit(tmp_path):
@@ -47,9 +62,10 @@ def test_read_offset_limit(tmp_path):
     out = asyncio.run(
         execute({"path": "a.txt", "offset": 2, "limit": 2}, workspace=str(tmp_path))
     )
-    assert "     2|b" in out
-    assert "     3|c" in out
-    assert "     1|a" not in out
+    assert out.startswith("b\n")
+    assert "\nc\n" in out
+    assert not out.startswith("a\n")
+    assert "|" not in out.split("Showing lines", 1)[0]
     assert "Use offset=4 to continue" in out
 
 
@@ -71,7 +87,8 @@ def test_short_pdf_returns_inline(tmp_path, monkeypatch):
     (tmp_path / "inv.pdf").write_bytes(b"%PDF-\x00fake")
     out = asyncio.run(execute({"path": "inv.pdf"}, workspace=str(tmp_path)))
     assert "Invoice UZR2GULN $100" in out
-    assert "     1|[pdf] inv.pdf" in out
+    assert "[pdf] inv.pdf" in out
+    assert "|" not in out.split("Showing lines", 1)[0]
     assert "saved:" not in out
 
 
@@ -206,7 +223,8 @@ def test_runtime_read_ok(tmp_path, monkeypatch):
         )
     )
     assert result.is_error is False
-    assert "     1|hi" in result.content
+    assert "hi" in result.content
+    assert "     1|hi" not in result.content
 
 
 def _min_png() -> bytes:

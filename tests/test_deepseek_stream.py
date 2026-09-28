@@ -67,6 +67,51 @@ def test_glm_switches_endpoint_and_keeps_thinking_on(monkeypatch):
     assert llm.api_base == "https://api.deepseek.com"
 
 
+def test_kimi_switches_endpoint_and_keeps_fixed_sampling(monkeypatch):
+    import asyncio
+
+    monkeypatch.setenv("MOONSHOT_API_KEY", "moon-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-test")
+    llm = DeepSeekLLM(api_key="sk-test")
+    assert llm.use("kimi-k3") == "kimi-k3"
+    assert llm.api_key == "moon-test"
+    assert llm.api_base == "https://api.moonshot.cn/v1"
+    assert llm.supports_images is True
+    assert llm.context_window == 1_000_000
+    seen = {}
+
+    async def fake_stream(payload, abort=None, on_delta=None):
+        seen["payload"] = payload
+        return [{"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}]
+
+    llm._stream = fake_stream
+    tools = [{"type": "function", "function": {"name": "bash", "parameters": {}}}]
+    asyncio.run(llm.call([{"role": "user", "content": "hi"}], tools=tools))
+    payload = seen["payload"]
+    assert payload["model"] == "kimi-k3"
+    assert payload["reasoning_effort"] == "max"
+    assert payload["tool_choice"] == "auto"
+    assert "temperature" not in payload
+    assert "top_p" not in payload
+    assert "stream_options" not in payload
+    assert "thinking" not in payload
+    asyncio.run(llm.call([{"role": "user", "content": "hi"}], max_tokens=400))
+    assert seen["payload"]["reasoning_effort"] == "low"
+    assert llm.use("kimi-k2.7-code") == "kimi-k2.7-code"
+    assert llm.api_key == "moon-test"
+    assert llm.supports_images is True
+    assert llm.context_window == 256_000
+    asyncio.run(llm.call([{"role": "user", "content": "hi"}], tools=tools))
+    payload = seen["payload"]
+    assert payload["model"] == "kimi-k2.7-code"
+    assert payload["tool_choice"] == "auto"
+    assert "reasoning_effort" not in payload
+    assert "temperature" not in payload
+    assert "top_p" not in payload
+    assert "stream_options" not in payload
+    assert "thinking" not in payload
+
+
 def test_zhipu_balance_429_is_not_retried():
     from agent_loop.llm.deepseek import LLMHTTPError, is_retryable_llm_error
 

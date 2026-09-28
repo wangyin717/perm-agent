@@ -203,9 +203,13 @@ def test_help_lists_one_command_per_row():
     asyncio.run(_run())
 
 
-def test_model_menu_is_one_list_and_marks_current():
+def test_model_menu_is_one_list_and_marks_current(monkeypatch):
     from agent_loop.cli.tui import ModelOption
     from agent_loop.llm.deepseek import DeepSeekLLM
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
+    monkeypatch.setenv("ZHIPU_API_KEY", "sk-zhipu")
+    monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
 
     async def _run() -> None:
         app = SparkTui("model-menu", "/tmp/spark-agent-tui-model")
@@ -324,6 +328,25 @@ def test_theme_command_switches_to_night():
     asyncio.run(_run())
 
 
+def test_one_paste_is_not_inserted_twice(monkeypatch):
+    async def _run() -> None:
+        from textual.events import Paste
+
+        app = SparkTui("paste-once", "/tmp/spark-agent-tui-paste")
+        async with app.run_test(size=(80, 24)) as pilot:
+            prompt = app.query_one("#prompt")
+            prompt.focus()
+            monkeypatch.setattr(type(app), "clipboard", property(lambda _self: "sk-once"))
+            await pilot.pause()
+            prompt.post_message(Paste("sk-once"))
+            await pilot.pause()
+            prompt.action_paste()
+            await pilot.pause()
+            assert prompt.value == "sk-once"
+
+    asyncio.run(_run())
+
+
 def test_slash_row_command_is_blue():
     from agent_loop.cli.tui import _BLUE, slash_row_text
 
@@ -344,6 +367,57 @@ def test_matching_slash_prefix():
     assert "/help" in names and "/new" in names and "/copy" in names
     assert [item[0] for item in matching_slash("/re")] == ["/resume", "/rename"]
     assert matching_slash("/zzz") == []
+    assert slash_prefix("/zzz") == "/zzz"
+
+
+def test_file_path_is_not_a_slash_command(tmp_path):
+    from agent_loop.cli.tui import looks_like_path
+
+    pdf = tmp_path / "resume(1).pdf"
+    pdf.write_bytes(b"%PDF")
+    assert looks_like_path(str(pdf))
+    assert slash_prefix(str(pdf)) is None
+    assert looks_like_path("/Users/wangyin/Desktop/resume(1).pdf")
+    assert slash_prefix("/help") == "/help"
+
+
+def test_submit_file_path_is_a_message_not_an_unknown_command(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("PERMANENT_HOME", str(home))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    pdf = tmp_path / "resume(1).pdf"
+    pdf.write_bytes(b"%PDF")
+
+    async def _run() -> None:
+        app = SparkTui("path-cmd", str(ws))
+        sent = []
+
+        async def fake_turn(query, media=None):
+            sent.append(query)
+
+        async with app.run_test(size=(90, 24)) as pilot:
+            app._run_turn = fake_turn
+            prompt = app.query_one("#prompt")
+            prompt.focus()
+            prompt.value = str(pdf)
+            await pilot.pause()
+            assert "-slash-cmd" not in prompt.classes
+            await pilot.press("enter")
+            await pilot.pause()
+            assert sent == [str(pdf)]
+            notes = [row._markup_source for row in app.query(TimelineRow)]
+            assert not any("unknown command" in note for note in notes)
+            prompt.value = "/not-a-command"
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert sent == [str(pdf)]
+            notes = [row._markup_source for row in app.query(TimelineRow)]
+            assert any("unknown command" in note for note in notes)
+
+    asyncio.run(_run())
 
 
 def test_prompt_wraps_chevron():
@@ -441,6 +515,7 @@ def test_slash_menu_filters_and_tab_completes(tmp_path, monkeypatch):
 
     home = tmp_path / "home"
     monkeypatch.setenv("PERMANENT_HOME", str(home))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     ws = tmp_path / "ws"
     ws.mkdir()
 

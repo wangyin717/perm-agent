@@ -219,7 +219,10 @@ def _paginate(text: str, offset=None, limit=None) -> str:
         end = start + len(selected)
     numbered = []
     for i, line in enumerate(selected, start=start + 1):
-        numbered.append(f"{i:6d}|{line}")
+        if i % 10 == 0:
+            numbered.append(f"{i:6d}|{line}")
+        else:
+            numbered.append(line)
     body = "\n".join(numbered)
     shown_start = start + 1
     shown_end = start + len(selected)

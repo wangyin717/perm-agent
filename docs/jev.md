@@ -10,7 +10,7 @@ Jev 是 TypeSafe 的决策模型：给一段状态和一组事先写好的问题
 | 2 | `web_fetch` 落盘之后、预览进模型之前 | 页面能不能给模型看 |
 | 3 | Flush 打 DeepSeek 之前 | 这一轮有没有可写的中期记忆 |
 
-试跑：`python test_jev/example.py`（key 在仓库根 `.env` 的 `TYPESAFE_API_KEY`）。
+试跑：`python test_jev/example.py`（key 在 `~/.permanent/.env` 的 `TYPESAFE_API_KEY`）。
 
 ---
 
@@ -166,7 +166,7 @@ Dream 的门（文件数、间隔小时）继续用规则，v1 不动。
 | `TYPESAFE_DEFAULT_MODEL` | 默认 `jev-latest` |
 | `SPARK_JEV` | `off` 时三处都不问（测 hook / Flush 回归用） |
 
-实现时把 `TYPESAFE_API_KEY` 写进 `.env.example`（只写变量名）。已有环境变量不覆盖，仍走 `envfile.load_dotenv()`。
+`TYPESAFE_API_KEY` 写在 `~/.permanent/.env`。`.env.example` 只有变量名。已有环境变量不覆盖，仍走 `envfile.load_dotenv()`。
 
 TUI：拦工具已经是错误 tool 行；Flush skip 本来就不进时间线。不必为 Jev 新开权限弹窗（v1 拿不准就拦）。
 

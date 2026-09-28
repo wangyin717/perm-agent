@@ -60,6 +60,7 @@ from agent_loop.prompt_images import (
 HELP_COMMANDS = (
     ("/help", "this list"),
     ("/model", "switch model"),
+    ("/login", "set API keys"),
     ("/theme", "switch day or night"),
     ("/copy", "copy the latest reply (not the thought)"),
     ("/exit", "quit (/quit same)"),
@@ -90,6 +91,8 @@ def parse_slash(text: str) -> Optional[str]:
         return "help"
     if name == "/model":
         return "model"
+    if name == "/login":
+        return "login"
     if name == "/theme":
         return "theme"
     if name == "/copy":
@@ -106,6 +109,7 @@ def parse_slash(text: str) -> Optional[str]:
 SLASH_COMMANDS = (
     ("/help", "this list", False),
     ("/model", "switch model", False),
+    ("/login", "set API keys", False),
     ("/theme", "switch light or dark", False),
     ("/copy", "copy the latest reply", False),
     ("/new", "new session", False),
@@ -117,9 +121,35 @@ SLASH_COMMANDS = (
 )
 
 
+def looks_like_path(token: str) -> bool:
+    """第一个词是文件路径，不是命令名。
+
+    `/Users/a/b.pdf` 里还有第二个斜杠。`/Users` 这种只有一段、但磁盘上存在的也算。
+    命令名是 `/help` 这种，没有第二个斜杠。
+    """
+    raw = (token or "").strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        raw = raw[1:-1].strip()
+    if not raw:
+        return False
+    if raw.startswith(("~/", "file://")):
+        return True
+    if raw.startswith("/") and "/" in raw[1:]:
+        return True
+    if raw.startswith("/"):
+        try:
+            return Path(raw).exists()
+        except OSError:
+            return False
+    return False
+
+
 def slash_prefix(text: str) -> Optional[str]:
     raw = text or ""
     if not raw.startswith("/") or " " in raw or "\n" in raw:
+        return None
+    # 正在打 `/re` 仍是命令。已经是路径就不要再当命令前缀。
+    if looks_like_path(raw) and not matching_slash(raw):
         return None
     return raw.lower()
 
@@ -544,6 +574,21 @@ def model_row_text(
     return body
 
 
+def provider_row_text(label: str, configured: bool, *, selected: bool) -> Text:
+    from agent_loop.cli.theme import palette
+
+    colors = palette()
+    body = Text()
+    body.append("› " if selected else "  ", style=colors.text)
+    body.append(label, style=colors.text)
+    body.append(" · ", style=colors.muted)
+    if configured:
+        body.append("configured", style="#2F8F4E")
+    else:
+        body.append("unconfigured", style=colors.muted)
+    return body
+
+
 class ModelOption(Static):
     """模型菜单里的一行。不参与鼠标选字。"""
 
@@ -599,6 +644,25 @@ class ModelOption(Static):
         choose = getattr(self.app, "choose_model", None)
         if callable(choose):
             self.app.call_later(choose, self.value)
+
+
+class ProviderOption(ModelOption):
+    def __init__(self, index: int, provider: str, label: str, configured: bool, *, selected: bool) -> None:
+        self.configured = configured
+        super().__init__(
+            index,
+            provider,
+            label,
+            "",
+            0,
+            selected=selected,
+            current=False,
+        )
+        self.update(provider_row_text(label, configured, selected=selected))
+
+    def set_state(self, *, selected: bool, current: bool) -> None:
+        self.update(provider_row_text(self.label, self.configured, selected=selected))
+        self.set_class(selected, "-selected")
 
 
 class ApprovalOption(Static):
@@ -1281,6 +1345,9 @@ class PromptInput(Input):
         approve = getattr(self.app, "action_approval_move", None)
         if callable(approve) and approve(-1):
             return
+        setup = getattr(self.app, "action_setup_move", None)
+        if callable(setup) and setup(-1):
+            return
         theme = getattr(self.app, "action_theme_move", None)
         if callable(theme) and theme(-1):
             return
@@ -1295,6 +1362,9 @@ class PromptInput(Input):
         approve = getattr(self.app, "action_approval_move", None)
         if callable(approve) and approve(1):
             return
+        setup = getattr(self.app, "action_setup_move", None)
+        if callable(setup) and setup(1):
+            return
         theme = getattr(self.app, "action_theme_move", None)
         if callable(theme) and theme(1):
             return
@@ -1308,6 +1378,9 @@ class PromptInput(Input):
     async def action_submit(self) -> None:
         confirm = getattr(self.app, "action_approval_confirm", None)
         if callable(confirm) and confirm():
+            return
+        setup = getattr(self.app, "action_setup_confirm", None)
+        if callable(setup) and setup():
             return
         theme = getattr(self.app, "action_theme_confirm", None)
         if callable(theme) and theme():
@@ -1328,15 +1401,22 @@ class PromptInput(Input):
         self._sync_draft()
 
     def _on_paste(self, event: Paste) -> None:
+        # Textual 会顺着父类再调一次 Input._on_paste。这里再 super 就会把同一段粘贴插两遍。
+        self._recent_paste_at = time.monotonic()
+        self._recent_paste_text = event.text or ""
         attach = getattr(self.app, "attach_paste_text", None)
         if callable(attach) and attach(event.text or ""):
-            event.stop()
-            return
-        super()._on_paste(event)
+            event.text = ""
+        event.stop()
 
     def action_paste(self) -> None:
-        attach = getattr(self.app, "attach_paste_text", None)
+        # 同一次 Cmd+V 可能再读剪贴板。刚处理过同样的粘贴就不要插第二次。
         clip_text = getattr(self.app, "clipboard", "") or ""
+        recent = time.monotonic() - getattr(self, "_recent_paste_at", 0.0)
+        pasted = getattr(self, "_recent_paste_text", "")
+        if recent < 1.0 and clip_text and pasted and clip_text.splitlines()[0] == pasted.splitlines()[0]:
+            return
+        attach = getattr(self.app, "attach_paste_text", None)
         if callable(attach) and clip_text and attach(clip_text):
             return
         clip_img = getattr(self.app, "attach_clipboard_image", None)
@@ -1611,7 +1691,12 @@ class SlashMenu(VerticalGroup):
 
 
 class Timeline(VerticalScroll):
-    """时间线：滚动立刻跳，不要默认的惯性动画。"""
+    """时间线：滚动立刻跳，不要默认的惯性动画。
+
+    点对话区域不要抢走输入框焦点，否则拖进来的图片路径进不了输入框。
+    """
+
+    FOCUS_ON_CLICK = False
 
     def action_scroll_up(self) -> None:
         self.scroll_up(animate=False, immediate=True)
@@ -1828,7 +1913,7 @@ class SparkTui(App):
         padding: 0 2 0 2;
         background: $page;
     }
-    #model-menu, #theme-menu {
+    #model-menu, #theme-menu, #setup-menu {
         display: none;
         height: auto;
         width: 100%;
@@ -1837,10 +1922,10 @@ class SparkTui(App):
         padding: 0;
         margin: 0 0 1 0;
     }
-    #model-menu.-open, #theme-menu.-open {
+    #model-menu.-open, #theme-menu.-open, #setup-menu.-open {
         display: block;
     }
-    #model-menu ModelOption, #theme-menu ModelOption {
+    #model-menu ModelOption, #theme-menu ModelOption, #setup-menu ModelOption {
         height: 1;
         width: 100%;
         padding: 0 1;
@@ -1850,8 +1935,22 @@ class SparkTui(App):
     #model-menu ModelOption:hover,
     #model-menu ModelOption.-selected,
     #theme-menu ModelOption:hover,
-    #theme-menu ModelOption.-selected {
+    #theme-menu ModelOption.-selected,
+    #setup-menu ModelOption:hover,
+    #setup-menu ModelOption.-selected {
         background: $menu-on;
+    }
+    #setup-note {
+        display: none;
+        height: auto;
+        width: 100%;
+        margin: 0 0 1 0;
+        padding: 0 1;
+        color: $text;
+        background: $page;
+    }
+    #setup-note.-open {
+        display: block;
     }
     #approval {
         display: none;
@@ -1980,6 +2079,9 @@ class SparkTui(App):
         self._theme_name = theme_name
         self._theme_open = False
         self._theme_index = 0
+        self._setup_step = ""
+        self._setup_provider = ""
+        self._setup_index = 0
         self.scroll_sensitivity_y = 4.0
         self.session_id = session_id
         self.workspace = workspace
@@ -1999,6 +2101,7 @@ class SparkTui(App):
         self._model_id = configured_model()
         self._model_open = False
         self._model_index = 0
+        self._model_rows = []
         self._bind_approver()
         self._busy = False
         self._unsub = None
@@ -2031,6 +2134,8 @@ class SparkTui(App):
         self._resume_from_id = ""
         self._draft_images: List[Dict] = []
         self._attaching_drop = False
+        self._prompt_value_seen = ""
+        self._return_focus_to_prompt = False
         self._queue_rows: Dict[str, QueuedMessage] = {}
         self._banner_shown: List[str] = []
         self._stdio_log_handlers: List = []
@@ -2045,11 +2150,18 @@ class SparkTui(App):
         with Vertical(id="prompt-dock"):
             yield Vertical(id="model-menu")
             yield Vertical(id="theme-menu")
+            yield Vertical(id="setup-menu")
+            yield Static("", id="setup-note")
             yield Vertical(id="approval")
             yield Static("", id="activity")
             with Horizontal(id="prompt-wrap"):
                 yield Static("›", id="prompt-mark")
-                yield PromptInput(placeholder="Message or /help", id="prompt", compact=True)
+                yield PromptInput(
+                    placeholder="Message or /help",
+                    id="prompt",
+                    compact=True,
+                    select_on_focus=False,
+                )
             yield Static("auto", id="prompt-mode")
 
     def on_click(self, event) -> None:
@@ -2084,6 +2196,10 @@ class SparkTui(App):
         self._replay_log(path)
         self._maybe_show_splash()
         self._paint_approval_mode()
+        from agent_loop.cli.setup import needs_setup
+
+        if needs_setup():
+            self._begin_setup()
         self.query_one("#prompt", Input).focus()
         self.run_worker(self.plugins.ensure_started, exclusive=True, group="plugins")
         self.run_worker(
@@ -2493,30 +2609,97 @@ class SparkTui(App):
         prompt = self.query_one("#prompt", Input)
         n = next_image_number(prompt.value, self._draft_images)
         self._draft_images.append({"n": n, "path": str(dest), "mime": mime})
-        start, end = (0, len(prompt.value)) if replace_all else prompt.selection
+        if replace_all:
+            start, end = 0, len(prompt.value)
+        else:
+            start, end = sorted(prompt.selection)
         before = prompt.value[:start]
         after = prompt.value[end:]
         token = f"[Image #{n}]"
         if before and not before[-1].isspace():
             token = " " + token
-        if after and not after[0].isspace():
+        if not after or not after[0].isspace():
             token = token + " "
         prompt.replace(token, start, end)
+        prompt.cursor_position = start + len(token)
+        self._arm_prompt_focus()
+
+    def _focus_prompt_now(self) -> None:
+        """把光标放进输入框。拖放时窗口常常已经失焦，不能等下一轮消息。"""
+        if self._setup_step in {"apikey", "search"}:
+            return
+        try:
+            prompt = self.query_one(PromptInput)
+            prompt.screen.set_focus(prompt, scroll_visible=False)
+        except Exception:
+            return
+
+    def _arm_prompt_focus(self) -> None:
+        self._return_focus_to_prompt = True
+        self._focus_prompt_now()
+
+    async def _on_app_focus(self, event) -> None:
+        # 拖图片时终端会先失焦。窗口重新变成当前窗口后，把光标放回输入框，
+        # 不要回到拖之前那个没有光标的区域。
+        if self._return_focus_to_prompt:
+            self._return_focus_to_prompt = False
+            self._focus_prompt_now()
+
+    def on_mouse_up(self, event) -> None:
+        if not self._return_focus_to_prompt:
+            return
+        if self.app_focus:
+            self._return_focus_to_prompt = False
+        self._focus_prompt_now()
+
+    async def on_event(self, event) -> None:
+        # 拖到对话区域时，焦点往往不在输入框。先在这里收路径，别送给时间线丢掉。
+        from textual.events import Paste
+
+        if (
+            isinstance(event, Paste)
+            and not event.is_forwarded
+            and self._setup_step not in {"apikey", "search"}
+            and self.attach_paste_text(event.text or "")
+        ):
+            try:
+                prompt = self.query_one(PromptInput)
+                prompt._recent_paste_at = time.monotonic()
+                prompt._recent_paste_text = event.text or ""
+            except Exception:
+                pass
+            self._arm_prompt_focus()
+            return
+        await super().on_event(event)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """终端拖文件常常不是 Paste 事件，而是把带引号的路径打进输入框。"""
         if event.input.id != "prompt" or self._attaching_drop:
             return
+        # 换图片时会先清掉路径再插入芯片，中间那次变更已经过期。
+        if (event.value or "") != (event.input.value or ""):
+            return
         text = event.value or ""
-        dropped = try_read_dropped_paths(text)
+        previous = self._prompt_value_seen
+        # 一次贴进来的那一段才算拖放。一个字一个字打出来的路径仍当普通文字。
+        chunk = text[len(previous) :] if text.startswith(previous) else text
+        dropped = try_read_dropped_paths(chunk)
         if dropped and any(kind == "image" for kind, _ in dropped):
             self._attaching_drop = True
             try:
-                self.attach_paste_text(text, replace_all=True)
+                if text.startswith(previous):
+                    event.input.value = previous
+                    event.input.cursor_position = len(event.input.value)
+                else:
+                    event.input.value = ""
+                self.attach_paste_text(chunk)
             finally:
                 self._attaching_drop = False
-            self._refresh_slash_menu(event.input.value or "")
+            self._prompt_value_seen = event.input.value or ""
+            self._refresh_slash_menu(self._prompt_value_seen)
+            self._arm_prompt_focus()
             return
+        self._prompt_value_seen = text
         self.sync_draft_images(text)
         self._refresh_slash_menu(text)
 
@@ -2574,6 +2757,11 @@ class SparkTui(App):
         return media
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if self._setup_step in {"apikey", "search"}:
+            text = (event.value or "").strip()
+            event.input.value = ""
+            self._submit_setup_text(text)
+            return
         menu = self._slash_menu()
         typed = event.value or ""
         prefix = slash_prefix(typed)
@@ -2600,7 +2788,8 @@ class SparkTui(App):
         if cmd:
             await self._run_command(cmd, text)
             return
-        if text.startswith("/"):
+        first = text.split(None, 1)[0]
+        if text.startswith("/") and not looks_like_path(first):
             self._hide_splash()
             self._timeline().mount(TimelineRow(_mark("unknown command. type /help"), classes="muted"))
             return
@@ -2717,6 +2906,13 @@ class SparkTui(App):
                 return
             self._hide_theme_menu()
             self._show_model_menu()
+            return
+        if cmd == "login":
+            if self._approval_future is not None:
+                return
+            self._hide_model_menu()
+            self._hide_theme_menu()
+            self._begin_setup()
             return
         if cmd == "theme":
             if self._approval_future is not None:
@@ -3223,20 +3419,27 @@ class SparkTui(App):
             future.set_result("allow")
 
     def _show_model_menu(self) -> None:
-        from agent_loop.llm.deepseek import MODEL_CHOICES
+        from agent_loop.cli.setup import configured_model_choices
 
+        choices = configured_model_choices()
+        if not choices:
+            self._hide_splash()
+            self._timeline().mount(
+                TimelineRow(_mark("No API key yet. Use /login."), classes="muted")
+            )
+            self._scroll_follow()
+            return
+        self._model_rows = list(choices)
         self._model_index = 0
-        for index, (model_id, _label, _description) in enumerate(MODEL_CHOICES):
+        for index, (model_id, _label, _description) in enumerate(self._model_rows):
             if model_id == self._model_id:
                 self._model_index = index
                 break
         self._model_open = True
-        name_width = max(
-            len(f"{label} (current)") for _model_id, label, _description in MODEL_CHOICES
-        )
+        name_width = max(len(f"{label} (current)") for _model_id, label, _description in self._model_rows)
         bar = self.query_one("#model-menu", Vertical)
         bar.remove_children()
-        for index, (model_id, label, description) in enumerate(MODEL_CHOICES):
+        for index, (model_id, label, description) in enumerate(self._model_rows):
             bar.mount(
                 ModelOption(
                     index,
@@ -3267,6 +3470,10 @@ class SparkTui(App):
             )
 
     def hover_model(self, index: int) -> None:
+        if self._setup_step in {"provider", "category"}:
+            self._setup_index = index
+            self._paint_setup_menu()
+            return
         if self._theme_open:
             self._theme_index = index
             self._paint_theme_menu()
@@ -3277,21 +3484,17 @@ class SparkTui(App):
         self._paint_model_menu()
 
     def action_model_move(self, delta: int) -> bool:
-        from agent_loop.llm.deepseek import MODEL_CHOICES
-
-        if not self._model_open or not MODEL_CHOICES:
+        if not self._model_open or not self._model_rows:
             return False
-        count = len(MODEL_CHOICES)
+        count = len(self._model_rows)
         self._model_index = (self._model_index + delta) % count
         self._paint_model_menu()
         return True
 
     def action_model_confirm(self) -> bool:
-        from agent_loop.llm.deepseek import MODEL_CHOICES
-
-        if not self._model_open or not MODEL_CHOICES:
+        if not self._model_open or not self._model_rows:
             return False
-        model_id = MODEL_CHOICES[self._model_index][0]
+        model_id = self._model_rows[self._model_index][0]
         self.choose_model(model_id)
         return True
 
@@ -3387,6 +3590,12 @@ class SparkTui(App):
             pass
 
     def choose_model(self, value: str) -> None:
+        if self._setup_step == "provider":
+            self._choose_setup_provider(value)
+            return
+        if self._setup_step == "category":
+            self._choose_setup_category(value)
+            return
         if self._theme_open:
             self.choose_theme(value)
             return
@@ -3399,7 +3608,178 @@ class SparkTui(App):
         self._timeline().mount(TimelineRow(_mark(f"model  {self._model_id}"), classes="muted"))
         self._scroll_follow()
 
+    def _setup_note(self, text: str) -> None:
+        note = self.query_one("#setup-note", Static)
+        note.update(text)
+        note.add_class("-open")
+
+    def _begin_setup(self) -> None:
+        self._hide_splash()
+        prompt = self.query_one("#prompt", Input)
+        prompt.password = False
+        prompt.placeholder = "Message or /help"
+        self._show_setup_categories()
+
+    def _mount_setup_rows(self, rows: list[tuple[str, str, str]]) -> None:
+        self._setup_index = 0
+        name_width = max(len(label) for _value, label, _hint in rows)
+        bar = self.query_one("#setup-menu", Vertical)
+        bar.remove_children()
+        for index, (value, label, hint) in enumerate(rows):
+            bar.mount(
+                ModelOption(
+                    index,
+                    value,
+                    label,
+                    hint,
+                    name_width,
+                    selected=index == 0,
+                    current=False,
+                )
+            )
+        bar.add_class("-open")
+
+    def _show_setup_categories(self) -> None:
+        from agent_loop.cli.setup import CATEGORIES
+
+        self._setup_step = "category"
+        self._setup_provider = ""
+        prompt = self.query_one("#prompt", Input)
+        prompt.password = False
+        prompt.placeholder = "Message or /help"
+        self._setup_note("Esc to exit.")
+        self._mount_setup_rows([(value, label, hint) for value, label, hint in CATEGORIES])
+
+    def _show_setup_providers(self) -> None:
+        from agent_loop.cli.setup import PROVIDERS, provider_configured
+
+        self._setup_step = "provider"
+        self._setup_provider = ""
+        prompt = self.query_one("#prompt", Input)
+        prompt.password = False
+        prompt.placeholder = "Message or /help"
+        self._setup_note("Choose a model provider. Esc to go back.")
+        self._setup_index = 0
+        bar = self.query_one("#setup-menu", Vertical)
+        bar.remove_children()
+        for index, (pid, label, _hint, _model) in enumerate(PROVIDERS):
+            bar.mount(
+                ProviderOption(
+                    index,
+                    pid,
+                    label,
+                    provider_configured(pid),
+                    selected=index == 0,
+                )
+            )
+        bar.add_class("-open")
+
+    def _paint_setup_menu(self) -> None:
+        for option in self.query("#setup-menu ModelOption"):
+            option.set_state(selected=option.option_index == self._setup_index, current=False)
+
+    def action_setup_move(self, delta: int) -> bool:
+        from agent_loop.cli.setup import CATEGORIES, PROVIDERS
+
+        if self._setup_step == "category":
+            count = len(CATEGORIES)
+        elif self._setup_step == "provider":
+            count = len(PROVIDERS)
+        else:
+            return False
+        self._setup_index = (self._setup_index + delta) % count
+        self._paint_setup_menu()
+        return True
+
+    def action_setup_confirm(self) -> bool:
+        from agent_loop.cli.setup import CATEGORIES, PROVIDERS
+
+        if self._setup_step == "category":
+            self._choose_setup_category(CATEGORIES[self._setup_index][0])
+            return True
+        if self._setup_step != "provider":
+            return False
+        self._choose_setup_provider(PROVIDERS[self._setup_index][0])
+        return True
+
+    def _choose_setup_category(self, category: str) -> None:
+        from agent_loop.cli.setup import SEARCH_ENV, SEARCH_NOTE
+
+        if category == "model":
+            self._show_setup_providers()
+            return
+        if category != "search":
+            return
+        self._setup_step = "search"
+        self.query_one("#setup-menu", Vertical).remove_class("-open")
+        self._setup_note(SEARCH_NOTE)
+        prompt = self.query_one("#prompt", Input)
+        prompt.password = True
+        prompt.placeholder = SEARCH_ENV
+        prompt.focus()
+
+    def _choose_setup_provider(self, pid: str) -> None:
+        from agent_loop.cli.setup import PROVIDER_ENV
+
+        if pid not in PROVIDER_ENV:
+            return
+        self._setup_provider = pid
+        self._setup_step = "apikey"
+        self.query_one("#setup-menu", Vertical).remove_class("-open")
+        env_name = PROVIDER_ENV[pid]
+        self._setup_note(f"Enter your {env_name}. Esc to go back.")
+        prompt = self.query_one("#prompt", Input)
+        prompt.password = True
+        prompt.placeholder = env_name
+        prompt.focus()
+
+    def _submit_setup_text(self, text: str) -> None:
+        from agent_loop.cli.setup import PROVIDER_ENV, SEARCH_ENV, default_model, save_env_key
+        from agent_loop.llm.deepseek import save_model
+
+        if self._setup_step == "apikey":
+            if not text:
+                env_name = PROVIDER_ENV[self._setup_provider]
+                self._setup_note(f"Enter your {env_name}. Esc to go back.")
+                return
+            save_env_key(PROVIDER_ENV[self._setup_provider], text)
+            self._model_id = save_model(default_model(self._setup_provider))
+            self._refresh_chrome()
+            self._show_setup_categories()
+            return
+        if self._setup_step == "search":
+            if text:
+                save_env_key(SEARCH_ENV, text)
+            self._show_setup_categories()
+
+    def _finish_setup(self) -> None:
+        self._setup_step = ""
+        self._setup_provider = ""
+        try:
+            bar = self.query_one("#setup-menu", Vertical)
+            bar.remove_class("-open")
+            bar.remove_children()
+            note = self.query_one("#setup-note", Static)
+            note.update("")
+            note.remove_class("-open")
+        except Exception:
+            pass
+        prompt = self.query_one("#prompt", Input)
+        prompt.password = False
+        prompt.placeholder = "Message or /help"
+        prompt.focus()
+
     def action_abort_turn(self) -> None:
+        if self._setup_step:
+            if self._setup_step == "apikey":
+                self._show_setup_providers()
+            elif self._setup_step == "provider":
+                self._show_setup_categories()
+            elif self._setup_step == "search":
+                self._show_setup_categories()
+            else:
+                self._finish_setup()
+            return
         menu = self._slash_menu()
         if menu.is_open:
             menu.close()

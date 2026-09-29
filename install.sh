@@ -135,9 +135,9 @@ checkout_src() {
     git clone "$REPO_URL" "$SRC"
   fi
   if git -C "$SRC" rev-parse "refs/tags/$target" >/dev/null 2>&1; then
-    git -C "$SRC" checkout --detach "refs/tags/$target"
+    git -C "$SRC" checkout -f --detach "refs/tags/$target"
   else
-    git -C "$SRC" checkout --detach "$target"
+    git -C "$SRC" checkout -f --detach "$target"
   fi
   ok "code at $target"
 }
@@ -270,7 +270,7 @@ ensure_uv
 checkout_src "$REF"
 log "uv sync"
 (cd "$SRC" && with_uv_home "$UV_DIR/uv" python install "$PYTHON_VERSION" >/dev/null 2>&1 || true)
-(cd "$SRC" && with_uv_home "$UV_DIR/uv" sync)
+(cd "$SRC" && with_uv_home "$UV_DIR/uv" sync --frozen)
 copy_skills
 install_browser_use
 write_wrapper

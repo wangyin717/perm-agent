@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from agent_loop.update import (
+    _checkout_detach,
     is_managed_install,
     migrate_uv_tools_dir,
     newer_than,
@@ -79,3 +80,23 @@ def test_migrate_uv_tools_dir(tmp_path, monkeypatch):
 def test_install_sh_syntax():
     script = Path(__file__).resolve().parent.parent / "install.sh"
     subprocess.run(["bash", "-n", str(script)], check=True)
+    text = script.read_text(encoding="utf-8")
+    assert "checkout -f --detach" in text
+    assert "sync --frozen" in text
+
+
+def test_checkout_detach_discards_tracked_edits(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "init"], cwd=src, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=src, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=src, check=True)
+    lock = src / "uv.lock"
+    lock.write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "uv.lock"], cwd=src, check=True)
+    subprocess.run(["git", "commit", "-m", "one"], cwd=src, check=True, capture_output=True)
+    subprocess.run(["git", "tag", "v0.0.1"], cwd=src, check=True)
+    lock.write_text("dirty\n", encoding="utf-8")
+    proc = _checkout_detach(src, "v0.0.1")
+    assert proc.returncode == 0
+    assert lock.read_text(encoding="utf-8") == "one\n"

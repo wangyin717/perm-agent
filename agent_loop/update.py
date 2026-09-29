@@ -209,6 +209,22 @@ def write_wrappers(home: Optional[Path] = None) -> None:
         path.chmod(0o755)
 
 
+def _checkout_detach(src: Path, target: str) -> subprocess.CompletedProcess:
+    """切换版本。安装时 uv sync 可能改过 uv.lock，托管目录里的改动直接丢掉。"""
+    checkout = _run(
+        ["git", "checkout", "-f", "--detach", f"refs/tags/{target}"],
+        cwd=src,
+        timeout=30,
+    )
+    if checkout.returncode != 0:
+        checkout = _run(
+            ["git", "checkout", "-f", "--detach", target],
+            cwd=src,
+            timeout=30,
+        )
+    return checkout
+
+
 def run_update(ref: Optional[str] = None, *, home: Optional[Path] = None) -> int:
     root = spark_home(home)
     src = src_dir(home)
@@ -231,17 +247,11 @@ def run_update(ref: Optional[str] = None, *, home: Optional[Path] = None) -> int
     if not target:
         print("no v*.*.* tags on the remote", file=sys.stderr)
         return 1
-    checkout = _run(
-        ["git", "checkout", "--detach", f"refs/tags/{target}"],
-        cwd=src,
-        timeout=30,
-    )
-    if checkout.returncode != 0:
-        checkout = _run(["git", "checkout", "--detach", target], cwd=src, timeout=30)
+    checkout = _checkout_detach(src, target)
     if checkout.returncode != 0:
         print(checkout.stderr or f"cannot checkout {target}", file=sys.stderr)
         return 1
-    sync = _run([str(uv), "sync"], cwd=src, timeout=180)
+    sync = _run([str(uv), "sync", "--frozen"], cwd=src, timeout=180)
     if sync.returncode != 0:
         print(sync.stderr or sync.stdout or "uv sync failed", file=sys.stderr)
         return 1

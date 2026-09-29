@@ -25,6 +25,6 @@ curl -fsSL https://raw.githubusercontent.com/wangyin717/perm-agent/main/install.
 
 Windows 请先打开 WSL，再在里面执行这条命令。
 
-进入项目目录后运行 `perm`。第一次打开时填写 `DEEPSEEK_API_KEY`。模型推荐用 DeepSeek，之后也可以用 `/login` 更换。
+先执行 `export PATH="$HOME/.local/bin:$PATH"`，再运行 `perm`。进入后用 `/login` 配置模型。推荐 DeepSeek。
 
 网页搜索默认用 DuckDuckGo。想要更好的结果，在 `/login` 的 Web search 里填写 `PERPLEXITY_API_KEY`。

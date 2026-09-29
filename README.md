@@ -25,6 +25,6 @@ curl -fsSL https://raw.githubusercontent.com/wangyin717/perm-agent/main/install.
 
 On Windows, open WSL first, then run this command there.
 
-Open a project directory and run `perm`. On first launch, set `DEEPSEEK_API_KEY`. DeepSeek is the recommended model provider. You can change it later with `/login`.
+Run `export PATH="$HOME/.local/bin:$PATH"`, then run `perm`. After it opens, use `/login` to configure a model. DeepSeek is the recommended provider.
 
 Web search uses DuckDuckGo unless you set a key. For better results, add `PERPLEXITY_API_KEY` under Web search in `/login`.

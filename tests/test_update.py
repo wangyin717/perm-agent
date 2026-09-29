@@ -83,6 +83,10 @@ def test_install_sh_syntax():
     text = script.read_text(encoding="utf-8")
     assert "checkout -f --detach" in text
     assert "sync --frozen" in text
+    assert "prompt_key" not in text
+    assert "DEEPSEEK_API_KEY" not in text
+    assert "still working" in text
+    assert "slow parts" in text
 
 
 def test_checkout_detach_discards_tracked_edits(tmp_path):

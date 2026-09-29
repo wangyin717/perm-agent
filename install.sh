@@ -2,7 +2,6 @@
 # Permanent installer. Usage:
 #   curl -fsSL https://raw.githubusercontent.com/wangyin717/perm-agent/main/install.sh | bash
 #   curl … | bash -s -- --ref v0.5.0
-#   curl … | bash -s -- --non-interactive
 set -euo pipefail
 
 REPO_URL="${PERMANENT_REPO:-https://github.com/wangyin717/perm-agent.git}"
@@ -14,24 +13,13 @@ TOOL_DIR="$PERMANENT_HOME/uv-tools"
 PYTHON_DIR="$PERMANENT_HOME/python"
 PYTHON_VERSION="3.11"
 REF=""
-NON_INTERACTIVE=false
 SKIP_BROWSER_USE=false
-
-if [ -t 0 ]; then
-  IS_INTERACTIVE=true
-else
-  IS_INTERACTIVE=false
-fi
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --ref|--version)
       REF="${2:-}"
       shift 2
-      ;;
-    --non-interactive)
-      NON_INTERACTIVE=true
-      shift
       ;;
     --no-browser-use)
       SKIP_BROWSER_USE=true
@@ -42,8 +30,6 @@ while [ $# -gt 0 ]; do
 Permanent installer
 
   --ref TAG     git tag (default: newest vX.Y.Z)
-  --non-interactive
-                do not prompt for DEEPSEEK_API_KEY
   --no-browser-use
                 skip installing the browser-use CLI
   -h, --help
@@ -70,6 +56,37 @@ with_uv_home() {
 log() { printf '→ %s\n' "$1"; }
 ok() { printf '✓ %s\n' "$1"; }
 die() { printf '✗ %s\n' "$1" >&2; exit 1; }
+
+note_wait() {
+  if ! printf '%s\n' "$1" 2>/dev/null >/dev/tty; then
+    printf '%s\n' "$1"
+  fi
+}
+
+# 长命令的输出先收进日志。5 秒后开始提示，之后每 10 秒一行。
+run_logged() {
+  local msg="$1"
+  shift
+  log "$msg"
+  local logf pid waited rc=0
+  logf="$(mktemp)"
+  "$@" >"$logf" 2>&1 &
+  pid=$!
+  waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+    if [ "$waited" -eq 5 ] || [ $((waited % 10)) -eq 0 ]; then
+      note_wait "  … still working, ${waited}s"
+    fi
+  done
+  wait "$pid" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    tail -n 20 "$logf" | sed 's/^/    /' >&2
+  fi
+  rm -f "$logf"
+  return "$rc"
+}
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "need $1 on PATH"
@@ -98,20 +115,18 @@ ensure_uv() {
     return 0
   fi
   need_cmd curl
-  log "installing uv into $UV_DIR"
-  local installer logf
+  local installer
   installer="$(mktemp)"
-  logf="$(mktemp)"
-  if ! curl -LsSf https://astral.sh/uv/install.sh -o "$installer"; then
-    rm -f "$installer" "$logf"
+  log "downloading uv"
+  if ! curl -fL --progress-bar -S https://astral.sh/uv/install.sh -o "$installer"; then
+    rm -f "$installer"
     die "could not download uv installer"
   fi
-  if ! UV_UNMANAGED_INSTALL="$UV_DIR" sh "$installer" >"$logf" 2>&1; then
-    sed 's/^/    /' "$logf" >&2
-    rm -f "$installer" "$logf"
+  if ! run_logged "installing uv" env UV_UNMANAGED_INSTALL="$UV_DIR" sh "$installer"; then
+    rm -f "$installer"
     die "uv install failed"
   fi
-  rm -f "$installer" "$logf"
+  rm -f "$installer"
   [ -x "$UV_DIR/uv" ] || die "uv installer ran but $UV_DIR/uv is missing"
   ok "uv $($UV_DIR/uv --version | awk '{print $2}')"
 }
@@ -124,15 +139,15 @@ checkout_src() {
     mv "$PERMANENT_HOME/tools" "$TOOL_DIR"
   fi
   if [ -d "$SRC/.git" ]; then
-    log "updating $SRC"
+    log "updating Permanent"
     git -C "$SRC" remote set-url origin "$REPO_URL" 2>/dev/null || true
-    git -C "$SRC" fetch --tags origin
+    git -C "$SRC" fetch --tags --progress origin
   else
     if [ -e "$SRC" ] && [ ! -d "$SRC/.git" ]; then
       die "$SRC exists and is not a git checkout"
     fi
-    log "cloning $REPO_URL"
-    git clone "$REPO_URL" "$SRC"
+    log "downloading Permanent"
+    git clone --progress "$REPO_URL" "$SRC"
   fi
   if git -C "$SRC" rev-parse "refs/tags/$target" >/dev/null 2>&1; then
     git -C "$SRC" checkout -f --detach "refs/tags/$target"
@@ -184,13 +199,15 @@ copy_skills() {
   local bundled="$SRC/agent_loop/bundled_skills"
   local plugs="$SRC/agent_loop/plugins"
   mkdir -p "$PERMANENT_HOME/skills" "$PERMANENT_HOME/plugins"
-  local d name
+  local d name skills="" plugins=""
+  log "copying skills and plugins"
   if [ -d "$bundled" ]; then
     for d in "$bundled"/*/; do
       [ -f "$d/SKILL.md" ] || continue
       name="$(basename "$d")"
       mkdir -p "$PERMANENT_HOME/skills/$name"
       cp -R "$d"/. "$PERMANENT_HOME/skills/$name"/
+      skills="${skills:+$skills, }$name"
     done
   fi
   if [ -d "$plugs" ]; then
@@ -200,8 +217,11 @@ copy_skills() {
       mkdir -p "$PERMANENT_HOME/plugins/$name"
       [ -f "$d/SKILL.md" ] && cp "$d/SKILL.md" "$PERMANENT_HOME/plugins/$name/SKILL.md"
       cp "$d/plugin.json" "$PERMANENT_HOME/plugins/$name/plugin.json"
+      plugins="${plugins:+$plugins, }$name"
     done
   fi
+  ok "skills: ${skills:-none}"
+  ok "plugins: ${plugins:-none}"
 }
 
 install_browser_use() {
@@ -209,10 +229,16 @@ install_browser_use() {
     log "skip browser-use CLI"
     return 0
   fi
-  log "browser-use CLI (Python 3.12)"
+  log "browser tools are next (this can take a few minutes)"
   mkdir -p "$TOOL_DIR" "$PYTHON_DIR" "$UV_DIR"
-  with_uv_home "$UV_DIR/uv" python install 3.12 >/dev/null 2>&1 || true
-  if ! with_uv_home "$UV_DIR/uv" tool install --python 3.12 --upgrade browser-use; then
+  if run_logged "downloading Python 3.12" \
+    with_uv_home "$UV_DIR/uv" python install 3.12; then
+    ok "Python 3.12"
+  else
+    log "Python 3.12 download did not finish; browser tools will try again"
+  fi
+  if ! run_logged "installing browser tools" \
+    with_uv_home "$UV_DIR/uv" tool install --python 3.12 --upgrade browser-use; then
     log "browser-use CLI failed; perm still works. retry: $UV_DIR/uv tool install --python 3.12 browser-use"
     return 0
   fi
@@ -223,59 +249,36 @@ install_browser_use() {
   ok "browser-use CLI ($TOOL_DIR)"
 }
 
-prompt_key() {
-  if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
-    return 0
-  fi
-  local envfile="$PERMANENT_HOME/.env"
-  if [ -f "$envfile" ] && grep -q '^DEEPSEEK_API_KEY=.' "$envfile"; then
-    return 0
-  fi
-  if [ "$NON_INTERACTIVE" = true ]; then
-    log "no DEEPSEEK_API_KEY; set it in $envfile"
-    return 0
-  fi
-  if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
-    log "no TTY; set DEEPSEEK_API_KEY in $envfile"
-    return 0
-  fi
-  printf "DEEPSEEK_API_KEY: " >/dev/tty
-  local key=""
-  IFS= read -r key </dev/tty || true
-  if [ -z "$key" ]; then
-    log "skipped; put DEEPSEEK_API_KEY in $envfile later"
-    return 0
-  fi
-  mkdir -p "$PERMANENT_HOME"
-  if [ -f "$envfile" ]; then
-    grep -v '^DEEPSEEK_API_KEY=' "$envfile" >"$envfile.tmp" || true
-    mv "$envfile.tmp" "$envfile"
-  fi
-  printf 'DEEPSEEK_API_KEY=%s\n' "$key" >>"$envfile"
-  chmod 600 "$envfile"
-  ok "wrote $envfile"
+sync_packages() {
+  (cd "$SRC" && with_uv_home "$UV_DIR/uv" sync --frozen)
 }
 
-printf '\nPermanent installer\n\n'
+printf '\nPermanent installer\n'
+printf 'This usually takes a few minutes. Python packages and browser tools are the slow parts.\n\n'
 need_cmd curl
 ensure_git
 if [ -z "$REF" ]; then
+  log "looking up the latest release"
   REF="$(latest_tag || true)"
 fi
 if [ -z "$REF" ]; then
   die "no vX.Y.Z tags on $REPO_URL — pass --ref main to install a branch"
 fi
-log "ref $REF"
+ok "release $REF"
 ensure_uv
 checkout_src "$REF"
-log "uv sync"
-(cd "$SRC" && with_uv_home "$UV_DIR/uv" python install "$PYTHON_VERSION" >/dev/null 2>&1 || true)
-(cd "$SRC" && with_uv_home "$UV_DIR/uv" sync --frozen)
+if run_logged "downloading Python $PYTHON_VERSION" \
+  with_uv_home "$UV_DIR/uv" python install "$PYTHON_VERSION"; then
+  ok "Python $PYTHON_VERSION"
+else
+  log "Python download did not finish; package install will try again"
+fi
+run_logged "installing Python packages (this can take a few minutes)" sync_packages
+ok "Python packages"
 copy_skills
 install_browser_use
 write_wrapper
 ensure_path
-prompt_key
 printf '\n✓ done. this shell does not pick up PATH yet; run:\n'
 printf '  export PATH="%s:$PATH"\n' "$LINK_DIR"
 printf '  perm\n'

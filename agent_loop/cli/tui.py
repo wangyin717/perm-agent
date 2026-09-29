@@ -1893,7 +1893,11 @@ ENDURANCE_SRC = Path(__file__).with_name("endurance.txt").read_text(encoding="ut
 ENDURANCE_ART = _shrink_ascii(ENDURANCE_SRC)
 
 
+LOGIN_HINT = "Use /login to configure a model first."
+
+
 def _splash_copy() -> Text:
+    from agent_loop.cli.setup import needs_setup
     from agent_loop.cli.theme import palette
 
     colors = palette()
@@ -1907,6 +1911,9 @@ def _splash_copy() -> Text:
     ):
         text.append(f"{name:<22}", style=colors.text)
         text.append(f"{key}\n", style=colors.faint)
+    if needs_setup():
+        text.append("\n")
+        text.append(LOGIN_HINT + "\n", style=colors.faint)
     return text
 
 
@@ -2338,10 +2345,6 @@ class SparkTui(App):
         self._replay_log(path)
         self._maybe_show_splash()
         self._paint_approval_mode()
-        from agent_loop.cli.setup import needs_setup
-
-        if needs_setup():
-            self._begin_setup()
         self.query_one("#prompt", Input).focus()
         self.run_worker(self.plugins.ensure_started, exclusive=True, group="plugins")
         self.run_worker(
@@ -2944,6 +2947,14 @@ class SparkTui(App):
         if text.startswith("/") and not looks_like_path(first):
             self._hide_splash()
             self._timeline().mount(TimelineRow(_mark("unknown command. type /help"), classes="muted"))
+            return
+        from agent_loop.cli.setup import needs_setup
+
+        if needs_setup():
+            self._hide_splash()
+            self._timeline().mount(TimelineRow(_mark(LOGIN_HINT), classes="muted"))
+            self._scroll_follow()
+            event.input.value = text
             return
         self._remember_query(text)
         media = self._take_submit_media(text)
@@ -3616,7 +3627,7 @@ class SparkTui(App):
         if not choices:
             self._hide_splash()
             self._timeline().mount(
-                TimelineRow(_mark("No API key yet. Use /login."), classes="muted")
+                TimelineRow(_mark(LOGIN_HINT), classes="muted")
             )
             self._scroll_follow()
             return

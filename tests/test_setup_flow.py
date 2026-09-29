@@ -96,6 +96,20 @@ def test_setup_saves_provider_key_and_skips_search(tmp_path, monkeypatch):
         app = SparkTui("setup", str(tmp_path / "ws"))
         async with app.run_test(size=(90, 28)) as pilot:
             await pilot.pause()
+            assert app._setup_step == ""
+            blurb = app.query_one("#blurb").content
+            blurb_text = blurb.plain if hasattr(blurb, "plain") else str(blurb)
+            assert "Use /login to configure a model first." in blurb_text
+            app.query_one("#prompt").value = "hello"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._busy is False
+            assert app.query_one("#prompt").value == "hello"
+            notes = [str(getattr(row, "_markup_source", "") or row.render()) for row in app.query("TimelineRow")]
+            assert any("Use /login to configure a model first." in note for note in notes)
+            app.query_one("#prompt").value = ""
+            await app._run_command("login", "/login")
+            await pilot.pause()
             assert app._setup_step == "category"
             labels = [row.value for row in app.query("#setup-menu ModelOption")]
             assert labels == ["model", "search"]

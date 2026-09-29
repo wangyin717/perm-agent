@@ -57,29 +57,50 @@ log() { printf '→ %s\n' "$1"; }
 ok() { printf '✓ %s\n' "$1"; }
 die() { printf '✗ %s\n' "$1" >&2; exit 1; }
 
-note_wait() {
-  if ! printf '%s\n' "$1" 2>/dev/null >/dev/tty; then
-    printf '%s\n' "$1"
+SPIN_ON=0
+SPIN_MSG=""
+
+spin_begin() {
+  SPIN_MSG="$1"
+  if printf '→ %s ' "$SPIN_MSG" 2>/dev/null >/dev/tty; then
+    SPIN_ON=1
+  else
+    SPIN_ON=0
+    printf '→ %s\n' "$SPIN_MSG"
   fi
 }
 
-# 长命令的输出先收进日志。5 秒后开始提示，之后每 10 秒一行。
+spin_mark() {
+  [ "$SPIN_ON" = 1 ] || return 0
+  printf '\r→ %s %s' "$SPIN_MSG" "$1" 2>/dev/null >/dev/tty || SPIN_ON=0
+}
+
+spin_end() {
+  [ "$SPIN_ON" = 1 ] || return 0
+  printf '\r→ %s   \n' "$SPIN_MSG" 2>/dev/null >/dev/tty || printf '\n'
+  SPIN_ON=0
+}
+
+# 长命令的输出先收进日志。同一行上闪一个菱形，表示还在进行。
 run_logged() {
   local msg="$1"
   shift
-  log "$msg"
-  local logf pid waited rc=0
+  local logf pid rc=0 on=1
   logf="$(mktemp)"
+  spin_begin "$msg"
   "$@" >"$logf" 2>&1 &
   pid=$!
-  waited=0
   while kill -0 "$pid" 2>/dev/null; do
-    sleep 1
-    waited=$((waited + 1))
-    if [ "$waited" -eq 5 ] || [ $((waited % 10)) -eq 0 ]; then
-      note_wait "  … still working, ${waited}s"
+    if [ "$on" = 1 ]; then
+      spin_mark "◆"
+      on=0
+    else
+      spin_mark "◇"
+      on=1
     fi
+    sleep 0.5
   done
+  spin_end
   wait "$pid" || rc=$?
   if [ "$rc" -ne 0 ]; then
     tail -n 20 "$logf" | sed 's/^/    /' >&2

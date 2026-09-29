@@ -85,7 +85,8 @@ def test_install_sh_syntax():
     assert "sync --frozen" in text
     assert "prompt_key" not in text
     assert "DEEPSEEK_API_KEY" not in text
-    assert "still working" in text
+    assert "still working" not in text
+    assert "◆" in text
     assert "slow parts" in text
 
 

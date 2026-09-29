@@ -223,7 +223,7 @@ def test_empty_prompt_cursor_sits_at_the_start(monkeypatch):
 
 def test_model_menu_is_one_list_and_marks_current(monkeypatch):
     from agent_loop.cli.tui import ModelOption
-    from agent_loop.llm.deepseek import DeepSeekLLM
+    from agent_loop.llm.deepseek import DeepSeek
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
     monkeypatch.setenv("ZHIPU_API_KEY", "sk-zhipu")
@@ -232,7 +232,7 @@ def test_model_menu_is_one_list_and_marks_current(monkeypatch):
     async def _run() -> None:
         app = SparkTui("model-menu", "/tmp/spark-agent-tui-model")
         async with app.run_test(size=(90, 24)) as pilot:
-            app.loop._llm = DeepSeekLLM(api_key="sk-test")
+            app.loop._llm = DeepSeek(api_key="sk-test")
             await app._run_command("model", "/model")
             await pilot.pause()
             rows = list(app.query("#model-menu ModelOption"))

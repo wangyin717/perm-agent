@@ -19,7 +19,7 @@ from agent_loop.compaction import (
     run_microcompact,
     run_summary_compaction,
 )
-from agent_loop.llm.deepseek import LLMResponse
+from agent_loop.llm import LLMResponse
 from agent_loop.recover import entries_to_messages
 from agent_loop.session_log import SessionLog, session_log_path
 from agent_loop.runtime.records import ToolResultEntry

@@ -20,7 +20,8 @@ from agent_loop.abort import Abort
 from agent_loop.compaction import ContextUsageTracker, maybe_compact
 from agent_loop.envfile import load_dotenv
 from agent_loop.inbox import UserInbox
-from agent_loop.llm import DeepSeekLLM
+from agent_loop.llm import make_client
+from agent_loop.llm.client import ChatClient
 from agent_loop.recover import (
     apply_recovery,
     entries_to_messages,
@@ -84,7 +85,7 @@ class ReactAgentLoop(AgentLoop):
 
     def __init__(self, deps: ExecutionDependencies, event_emitter, plugin_manager):
         super().__init__(deps, event_emitter, plugin_manager)
-        self._llm: Optional[DeepSeekLLM] = None
+        self._llm: Optional[ChatClient] = None
         self.runtime = ToolRuntime()
         self.runtime.plugin_host = plugin_manager
         self._log: Optional[SessionLog] = None
@@ -104,20 +105,19 @@ class ReactAgentLoop(AgentLoop):
     def tool_result_records(self):
         return self.runtime.tool_result_records
 
-    def _get_llm(self) -> DeepSeekLLM:
+    def _get_llm(self) -> ChatClient:
         if self._llm is None:
             load_dotenv()
-            from agent_loop.llm.deepseek import configured_model
-
-            self._llm = DeepSeekLLM(model=configured_model())
+            self._llm = make_client()
         return self._llm
 
     def set_model(self, model_id: str) -> str:
-        from agent_loop.llm.deepseek import save_model
+        from agent_loop.llm.models import save_model
 
         model_id = save_model(model_id)
         if self._llm is not None:
-            self._llm.use(model_id)
+            load_dotenv()
+            self._llm = make_client(model_id)
         return model_id
 
     def _seed_title(self, user_action_data: Dict[str, Any], hint: str = "") -> None:

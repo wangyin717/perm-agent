@@ -2552,7 +2552,7 @@ class SparkTui(App):
         self._approval_options: list[tuple[str, str]] = []
         self._approval_index = 0
         self._approval_text = ""
-        from agent_loop.llm.deepseek import configured_model
+        from agent_loop.llm.models import configured_model
 
         self._model_id = configured_model()
         self._model_open = False
@@ -3458,7 +3458,7 @@ class SparkTui(App):
         self.query_one("#chrome-usage", Static).update(self._usage_label())
 
     def _usage_label(self) -> str:
-        from agent_loop.llm.deepseek import CONTEXT_WINDOWS, DEFAULT_CONTEXT_WINDOW
+        from agent_loop.llm.models import CONTEXT_WINDOWS, DEFAULT_CONTEXT_WINDOW
 
         model = self._model_name()
         limit = self._context_limit
@@ -4249,7 +4249,7 @@ class SparkTui(App):
 
     def _submit_setup_text(self, text: str) -> None:
         from agent_loop.cli.setup import PROVIDER_ENV, SEARCH_ENV, default_model, save_env_key
-        from agent_loop.llm.deepseek import save_model
+        from agent_loop.llm.models import save_model
 
         if self._setup_step == "apikey":
             if not text:

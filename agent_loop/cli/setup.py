@@ -32,11 +32,13 @@ SEARCH_NOTE = (
 
 def configured_model_choices():
     """只返回已经写了 API 密钥的供应商下的模型。"""
-    from agent_loop.llm.deepseek import MODEL_CHOICES, provider_of
+    from agent_loop.llm.models import MODEL_CHOICES, provider_of
 
     ready = []
     for choice in MODEL_CHOICES:
-        provider = {"zhipu": "glm"}.get(provider_of(choice[0]), provider_of(choice[0]))
+        provider = {"zhipuai": "glm", "moonshot": "kimi"}.get(
+            provider_of(choice[0]), provider_of(choice[0])
+        )
         env_name = PROVIDER_ENV.get(provider)
         if env_name and (os.environ.get(env_name) or "").strip():
             ready.append(choice)

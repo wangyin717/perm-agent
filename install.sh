@@ -62,7 +62,7 @@ SPIN_MSG=""
 
 spin_begin() {
   SPIN_MSG="$1"
-  if printf '→ %s ' "$SPIN_MSG" 2>/dev/null >/dev/tty; then
+  if printf '◆ %s' "$SPIN_MSG" 2>/dev/null >/dev/tty; then
     SPIN_ON=1
   else
     SPIN_ON=0
@@ -72,7 +72,7 @@ spin_begin() {
 
 spin_mark() {
   [ "$SPIN_ON" = 1 ] || return 0
-  printf '\r→ %s %s' "$SPIN_MSG" "$1" 2>/dev/null >/dev/tty || SPIN_ON=0
+  printf '\r%s %s' "$1" "$SPIN_MSG" 2>/dev/null >/dev/tty || SPIN_ON=0
 }
 
 spin_end() {

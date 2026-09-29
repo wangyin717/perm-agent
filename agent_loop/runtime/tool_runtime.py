@@ -23,6 +23,13 @@ from agent_loop.tools.registry import available_tool_names, get_tool
 from agent_loop.cli.trace import log_tool_result, log_tool_start
 
 
+USER_DENIED = "The user denied this action."
+
+
+def is_user_denied(result: Optional[ToolResultEntry]) -> bool:
+    return result is not None and result.content == USER_DENIED
+
+
 def _brief_exc(exc: BaseException) -> str:
     text = str(exc).strip() or type(exc).__name__
     return text.splitlines()[0][:200]
@@ -115,7 +122,8 @@ class ToolRuntime:
                         result_id=new_result_id(),
                         tool_call_id=call_id,
                         tool_name=name,
-                        message="The user denied this action.",
+                        message=USER_DENIED,
+                        terminate=True,
                     )
                 ),
             )

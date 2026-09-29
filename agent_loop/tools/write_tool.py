@@ -55,5 +55,7 @@ async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_di
             hunk=marked,
             rows=pack_rows(rows),
             extra=extra,
+            before=old if existed else None,
+            after=content,
         )
     return f"{summary}\n\n{plain}" if plain else summary

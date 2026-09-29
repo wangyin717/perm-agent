@@ -36,6 +36,8 @@ class Palette:
     cursor_fg: str
     diff_add: str
     diff_del: str
+    diff_add_fg: str
+    diff_del_fg: str
     splash_border: str
     mark_rest: str
     dark: bool
@@ -107,6 +109,8 @@ DAY = Palette(
     cursor_fg="#ffffff",
     diff_add="#daf2dc",
     diff_del="#f5dade",
+    diff_add_fg="#378E23",
+    diff_del_fg="#CD3048",
     splash_border="#d5d5d8",
     mark_rest="#c7c7cc",
     dark=False,
@@ -140,10 +144,56 @@ NIGHT = Palette(
     cursor_fg="#0a0a0a",
     diff_add="#063806",
     diff_del="#420e14",
+    diff_add_fg="#9ece6a",
+    diff_del_fg="#f7768e",
     splash_border="#323237",
     mark_rest="#414141",
     dark=True,
 )
+
+@dataclass(frozen=True)
+class CodeColors:
+    """代码高亮，对齐 Grok 浅色 / 深色主题。"""
+
+    keyword: str
+    string: str
+    number: str
+    function: str
+    builtin: str
+    operator: str
+    comment: str
+    text: str
+    tag: str
+
+
+DAY_CODE = CodeColors(
+    keyword="#7D4BC6",
+    string="#378E23",
+    number="#C3691E",
+    function="#2F64D2",
+    builtin="#0F87A2",
+    operator="#5580A8",
+    comment="#909090",
+    text="#444444",
+    tag="#CD3048",
+)
+
+NIGHT_CODE = CodeColors(
+    keyword="#bb9af7",
+    string="#9ece6a",
+    number="#ff9e64",
+    function="#7aa2f7",
+    builtin="#0db9d7",
+    operator="#89ddff",
+    comment="#51597d",
+    text="#c8c8c8",
+    tag="#f7768e",
+)
+
+
+def code_colors() -> CodeColors:
+    return NIGHT_CODE if _current.dark else DAY_CODE
+
 
 PALETTES = {"day": DAY, "night": NIGHT}
 _ALIASES = {"grokday": "day", "groknight": "night"}

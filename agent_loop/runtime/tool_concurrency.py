@@ -15,8 +15,23 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Sequence
 
-from agent_loop.runtime.tool_runtime import PreparedCall, ToolRuntime
+from agent_loop.runtime.tool_runtime import USER_DENIED, PreparedCall, ToolRuntime, is_user_denied
 from agent_loop.runtime.records import ToolResultEntry, create_error_tool_result, new_result_id
+
+
+def _denied_without_running(runtime: ToolRuntime, tool_call: Dict[str, Any]) -> PreparedCall:
+    """同批里排在拒绝之后的调用：记一条拒绝结果，不再询问、不再执行。"""
+    call_id = tool_call.get("id") or ""
+    name = (tool_call.get("function") or {}).get("name") or ""
+    result = runtime.record_tool_result(
+        create_error_tool_result(
+            result_id=new_result_id(),
+            tool_call_id=call_id,
+            tool_name=name,
+            message=USER_DENIED,
+        )
+    )
+    return PreparedCall(tool_call=tool_call, call_id=call_id, name=name, result=result)
 
 
 def terminate_cutoff(results: Sequence[ToolResultEntry]) -> int:
@@ -32,10 +47,39 @@ async def run_tool_calls(
     tool_calls: Sequence[Dict[str, Any]],
     sandbox=None,
 ) -> List[ToolResultEntry]:
-    """跑完一批 tool_calls，返回与输入等长、同序的结果。"""
+    """跑完一批 tool_calls，返回与输入等长、同序的结果。
+
+    用户拒绝其中一次后，同批里还没执行的调用不再执行，还没问的也不再问。
+    """
     prepared: List[PreparedCall] = []
+    denied = False
     for tool_call in tool_calls:
-        prepared.append(await runtime._prepare_call(tool_call))
+        if denied:
+            prepared.append(_denied_without_running(runtime, tool_call))
+            continue
+        item = await runtime._prepare_call(tool_call)
+        prepared.append(item)
+        if is_user_denied(item.result):
+            denied = True
+
+    if denied:
+        results: List[ToolResultEntry] = []
+        for item in prepared:
+            if item.result is not None:
+                results.append(item.result)
+                continue
+            result_id = item.started.result_id if item.started else new_result_id()
+            results.append(
+                runtime.record_tool_result(
+                    create_error_tool_result(
+                        result_id=result_id,
+                        tool_call_id=item.call_id,
+                        tool_name=item.name,
+                        message=USER_DENIED,
+                    )
+                )
+            )
+        return results
 
     write_locks: Dict[str, asyncio.Lock] = {}
     for item in prepared:

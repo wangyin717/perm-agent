@@ -433,11 +433,6 @@ def _thinking_line(dt: float) -> str:
     return _mark(f"[bold]Thinking[/][$muted]… {format_wait(dt)}[/]")
 
 
-def _think_mark(on: bool) -> str:
-    style = "$text" if on else "$faint"
-    return f"[{style}]◆[/]"
-
-
 def _thought_line(dt: float) -> str:
     return _mark(f"[bold]Thought[/] [$muted]for {format_wait(dt)}[/]")
 
@@ -507,53 +502,271 @@ def _copy_notice(text: str, path: Path) -> str:
     )
 
 
-_PYGMENT_COLORS = {
-    Token.Keyword: "#7c3aed",
-    Token.Keyword.Constant: "#7c3aed",
-    Token.Name.Builtin: "#7c3aed",
-    Token.Name.Function: _TEXT,
-    Token.Name.Class: _TEXT,
-    Token.Name.Decorator: _BLUE,
-    Token.String: "#C3691E",
-    Token.String.Doc: "#C3691E",
-    Token.Comment: _MUTED,
-    Token.Number: _BLUE,
-    Token.Operator: _SECONDARY,
-}
+# 更具体的种类写在前面。True/None 走数字色，文档字符串走注释色。
+# HTML 标签、属性对齐 Grok：标签用 tag，属性用关键字的紫色。
+_PYGMENT_SLOTS = (
+    (Token.Keyword.Constant, "number"),
+    (Token.Keyword, "keyword"),
+    (Token.Name.Tag, "tag"),
+    (Token.Name.Attribute, "keyword"),
+    (Token.Name.Entity, "builtin"),
+    (Token.Name.Builtin, "builtin"),
+    (Token.Name.Function, "function"),
+    (Token.Name.Decorator, "function"),
+    (Token.Name.Class, "builtin"),
+    (Token.String.Doc, "comment"),
+    (Token.String, "string"),
+    (Token.Number, "number"),
+    (Token.Comment, "comment"),
+    (Token.Operator, "operator"),
+    (Token.Punctuation, "operator"),
+)
+
+# 和 Grok 一样，太大的文件不整份上色，改回按行上色。
+_HL_MAX_BYTES = 2 * 1024 * 1024
+_HL_MAX_LINES = 50_000
+
+
+def expand_code_tabs(text: str, width: int = 4) -> str:
+    """Tab 换成 4 个空格。留在原文里时，终端会把这一格丢掉，缩进就错了。"""
+    if "\t" not in text:
+        return text
+    return text.replace("\t", " " * width)
 
 
 def _pygment_style(tok) -> str:
+    from agent_loop.cli.theme import code_colors
+
+    colors = code_colors()
     while tok is not None:
-        if tok in _PYGMENT_COLORS:
-            return _PYGMENT_COLORS[tok]
+        for kind, slot in _PYGMENT_SLOTS:
+            if tok is kind:
+                color = getattr(colors, slot)
+                if slot == "comment":
+                    return f"italic {color}"
+                return color
         tok = getattr(tok, "parent", None)
-    return _TEXT
+    return colors.text
+
+
+class _TokenPainter:
+    """`function` / `class` 后面的名字单独上色。Pygments 在 JS 里不标函数名。"""
+
+    def __init__(self) -> None:
+        self.want: Optional[str] = None
+
+    def style(self, tok, val: str) -> str:
+        from agent_loop.cli.theme import code_colors
+
+        base = _pygment_style(tok)
+        stripped = val.strip()
+        if self.want and stripped and tok in Token.Name:
+            slot = self.want
+            self.want = None
+            return getattr(code_colors(), slot)
+        if stripped and not (
+            tok in Token.Keyword.Declaration and stripped in ("function", "class")
+        ):
+            self.want = None
+        if tok in Token.Keyword.Declaration and stripped == "function":
+            self.want = "function"
+        elif tok in Token.Keyword.Declaration and stripped == "class":
+            self.want = "builtin"
+        return base
+
+
+def _lexer_for_filename(filename: str):
+    if not filename:
+        return None
+    try:
+        from pygments.lexers import get_lexer_for_filename
+        from pygments.util import ClassNotFound
+    except ImportError:
+        return None
+    try:
+        return get_lexer_for_filename(filename, stripnl=False)
+    except (ClassNotFound, ValueError, TypeError):
+        return None
+
+
+def _python_lexer():
+    try:
+        from pygments.lexers import get_lexer_by_name
+        from pygments.util import ClassNotFound
+    except ImportError:
+        return None
+    try:
+        return get_lexer_by_name("python", stripnl=False)
+    except ClassNotFound:
+        return None
+
+
+def _clip_highlighted(text: Text) -> Text:
+    from agent_loop.cli.theme import code_colors
+    from agent_loop.tools.diff_view import DIFF_LINE_CHARS
+
+    if len(text.plain) <= DIFF_LINE_CHARS:
+        return text
+    clipped = text[: DIFF_LINE_CHARS - 1]
+    clipped.append("…", style=code_colors().text)
+    return clipped
+
+
+def _paint_tokens(tokens, needed: set, ended_with_newline: bool) -> Dict[int, Text]:
+    """按换行切开。只保留 needed 里的行号，但前面的行仍要喂给词法，状态才对。"""
+    if not needed:
+        return {}
+    max_line = max(needed)
+    painter = _TokenPainter()
+    out: Dict[int, Text] = {}
+    buf = Text()
+    n = 1
+
+    def finish() -> bool:
+        nonlocal buf, n
+        if n in needed:
+            out[n] = _clip_highlighted(buf)
+        buf = Text()
+        n += 1
+        return n > max_line
+
+    for tok, val in tokens:
+        if val == "":
+            painter.style(tok, val)
+            continue
+        style = painter.style(tok, val)
+        start = 0
+        while True:
+            nl = val.find("\n", start)
+            if nl < 0:
+                piece = val[start:]
+                if piece and n in needed:
+                    buf.append(piece, style)
+                break
+            piece = val[start:nl]
+            if piece and n in needed:
+                buf.append(piece, style)
+            if finish():
+                return out
+            start = nl + 1
+    if not ended_with_newline and n in needed:
+        out[n] = _clip_highlighted(buf)
+    return out
+
+
+def _prepare_source(source: str) -> Optional[str]:
+    try:
+        raw = source.replace("\r\n", "\n").replace("\r", "\n")
+        if len(raw.encode("utf-8")) > _HL_MAX_BYTES:
+            return None
+    except UnicodeError:
+        return None
+    if raw == "":
+        return ""
+    nlines = raw.count("\n")
+    if not raw.endswith("\n"):
+        nlines += 1
+    if nlines > _HL_MAX_LINES:
+        return None
+    return expand_code_tabs(raw)
+
+
+def highlight_document(
+    source: str, filename: str, needed: set
+) -> Optional[Dict[int, Text]]:
+    """整份文件一起上色。<script> 里的 JavaScript 才认得出来。太大返回 None。"""
+    if not isinstance(source, str) or not needed:
+        return None
+    text = _prepare_source(source)
+    if text is None:
+        return None
+    if text == "":
+        return {}
+    lexer = _lexer_for_filename(filename)
+    if lexer is None:
+        return None
+    try:
+        tokens = lexer.get_tokens(text)
+    except Exception:
+        return None
+    return _paint_tokens(tokens, needed, text.endswith("\n"))
 
 
 def highlight_code_line(code: str, filename: str = "") -> Text:
-    code = clip_diff_line(code.replace("\n", ""))
-    try:
-        from pygments.lexers import get_lexer_by_name, get_lexer_for_filename
-        from pygments.util import ClassNotFound
-    except ImportError:
-        return Text(code, style=_TEXT)
-    lexer = None
-    if filename:
-        try:
-            lexer = get_lexer_for_filename(filename, code, stripnl=False)
-        except (ClassNotFound, ValueError):
-            lexer = None
+    from agent_loop.cli.theme import code_colors
+
+    code = clip_diff_line(expand_code_tabs(code.replace("\n", "")))
+    plain = code_colors().text
+    lexer = _lexer_for_filename(filename) if filename else None
     if lexer is None:
-        try:
-            lexer = get_lexer_by_name("python", stripnl=False)
-        except ClassNotFound:
-            return Text(code, style=_TEXT)
+        lexer = _python_lexer()
+    if lexer is None:
+        return Text(code, style=plain)
     out = Text()
-    for tok, val in lexer.get_tokens(code + "\n"):
+    painter = _TokenPainter()
+    try:
+        tokens = lexer.get_tokens(code + "\n")
+    except Exception:
+        return Text(code, style=plain)
+    for tok, val in tokens:
         val = val.replace("\n", "")
         if val:
-            out.append(val, _pygment_style(tok))
-    return out if out.plain else Text(code, style=_TEXT)
+            out.append(val, painter.style(tok, val))
+    return out if out.plain else Text(code, style=plain)
+
+
+def code_for_diff_row(
+    kind: str,
+    ln: int,
+    body: str,
+    filename: str,
+    before_lines: Optional[Dict[int, Text]],
+    after_lines: Optional[Dict[int, Text]],
+) -> Text:
+    """删除行用改前的文件，其余用改后的。对不上就退回按这一行上色。"""
+    pool = before_lines if kind == "del" else after_lines
+    expected = clip_diff_line(expand_code_tabs((body or "").replace("\n", "")))
+    if pool is not None and ln >= 1:
+        styled = pool.get(ln)
+        if styled is not None and styled.plain == expected:
+            return styled
+    return highlight_code_line(body or "", filename)
+
+
+def highlight_diff_rows(
+    rows: List[dict],
+    filename: str,
+    before: Optional[str],
+    after: Optional[str],
+) -> List[Text]:
+    del_lns: set = set()
+    new_lns: set = set()
+    parsed = []
+    for row in rows:
+        kind = str(row.get("kind") or "ctx")
+        ln = int(row.get("ln") or 0)
+        body = str(row.get("body") or "")
+        parsed.append((kind, ln, body))
+        if ln < 1:
+            continue
+        if kind == "del":
+            del_lns.add(ln)
+        else:
+            new_lns.add(ln)
+    before_lines = (
+        highlight_document(before, filename, del_lns)
+        if isinstance(before, str) and del_lns
+        else None
+    )
+    after_lines = (
+        highlight_document(after, filename, new_lns)
+        if isinstance(after, str) and new_lns
+        else None
+    )
+    return [
+        code_for_diff_row(kind, ln, body, filename, before_lines, after_lines)
+        for kind, ln, body in parsed
+    ]
 
 
 class UserBanner(Static):
@@ -591,12 +804,14 @@ def model_row_text(
 
     colors = palette()
     body = Text()
-    body.append("› " if selected else "  ", style=colors.text)
+    name_style = f"bold {colors.text}" if selected else colors.text
+    detail_style = f"bold {colors.muted}" if selected else colors.muted
+    body.append("› " if selected else "  ", style=name_style)
     shown = f"{label} (current)" if current else label
-    body.append(shown, style=colors.text)
+    body.append(shown, style=name_style)
     if description:
         body.append(" " * max(2, name_width - len(shown) + 2))
-        body.append(description, style=colors.muted)
+        body.append(description, style=detail_style)
     return body
 
 
@@ -605,13 +820,15 @@ def provider_row_text(label: str, configured: bool, *, selected: bool) -> Text:
 
     colors = palette()
     body = Text()
-    body.append("› " if selected else "  ", style=colors.text)
-    body.append(label, style=colors.text)
-    body.append(" · ", style=colors.muted)
+    name_style = f"bold {colors.text}" if selected else colors.text
+    body.append("› " if selected else "  ", style=name_style)
+    body.append(label, style=name_style)
+    detail = f"bold {colors.muted}" if selected else colors.muted
+    body.append(" · ", style=detail)
     if configured:
-        body.append("configured", style="#2F8F4E")
+        body.append("configured", style="bold #2F8F4E" if selected else "#2F8F4E")
     else:
-        body.append("unconfigured", style=colors.muted)
+        body.append("unconfigured", style=detail)
     return body
 
 
@@ -697,9 +914,17 @@ class ApprovalOption(Static):
     allow_select = False
 
     def __init__(self, index: int, action: str, label: str) -> None:
-        super().__init__(label, markup=False)
         self.option_index = index
         self.action = action
+        self.label = label
+        super().__init__(self._row(False), markup=False)
+
+    def _row(self, selected: bool) -> str:
+        return f"{'●' if selected else '○'} {self.label}"
+
+    def set_selected(self, selected: bool) -> None:
+        self.update(self._row(selected))
+        self.set_class(selected, "-selected")
 
     def on_enter(self) -> None:
         hover = getattr(self.app, "hover_approval", None)
@@ -1182,8 +1407,35 @@ class ResumePicker(VerticalGroup, can_focus=True):
             self.app.run_worker(cancel(), exclusive=True, group="session")
 
 
+def diff_line_text(
+    kind: str,
+    ln: int,
+    body: str,
+    filename: str = "",
+    gutter_width: int = 0,
+    code: Optional[Text] = None,
+) -> Text:
+    """行号：删除红、新增绿。整行底色由样式铺满，不画在字上。"""
+    from agent_loop.cli.theme import palette
+
+    colors = palette()
+    if kind == "del":
+        gutter_color = colors.diff_del_fg
+    elif kind == "add":
+        gutter_color = colors.diff_add_fg
+    else:
+        gutter_color = colors.muted
+    width = gutter_width if gutter_width > 0 else len(str(ln))
+    label = f"{ln:>{width}}  "
+    gutter = Text(label)
+    gutter.stylize(gutter_color, 0, len(label))
+    if code is None:
+        code = highlight_code_line(body, filename)
+    return gutter + code
+
+
 class DiffLine(Static):
-    """一行补丁：行号 gutter + 高亮代码，背景铺满整行。"""
+    """一行补丁。增删行的红绿底铺满整行，包括行号右边的空白。"""
 
     ALLOW_SELECT = True
     DEFAULT_CSS = """
@@ -1196,12 +1448,21 @@ class DiffLine(Static):
     DiffLine.del { background: $diff-del; }
     """
 
-    def __init__(self, kind: str, ln: int, body: str, filename: str = "") -> None:
-        from agent_loop.cli.theme import palette
-
-        gutter = Text(f"{ln:>5}  ", style=palette().muted)
-        renderable = gutter + highlight_code_line(body, filename)
-        super().__init__(renderable, markup=False, classes=kind, expand=True)
+    def __init__(
+        self,
+        kind: str,
+        ln: int,
+        body: str,
+        filename: str = "",
+        gutter_width: int = 0,
+        code: Optional[Text] = None,
+    ) -> None:
+        super().__init__(
+            diff_line_text(kind, ln, body, filename, gutter_width, code),
+            markup=False,
+            classes=kind,
+            expand=True,
+        )
 
 
 class DiffBlock(VerticalGroup):
@@ -1222,19 +1483,27 @@ class DiffBlock(VerticalGroup):
         rows: List[dict],
         extra: str = "",
         filename: str = "",
+        before: Optional[str] = None,
+        after: Optional[str] = None,
     ) -> None:
         super().__init__()
         self._rows = rows
         self._extra = extra
         self._filename = filename
+        self._codes = highlight_diff_rows(rows, filename, before, after)
 
     def compose(self):
+        width = 1
         for row in self._rows:
+            width = max(width, len(str(int(row.get("ln") or 0))))
+        for row, code in zip(self._rows, self._codes):
             yield DiffLine(
                 str(row.get("kind") or "ctx"),
                 int(row.get("ln") or 0),
                 str(row.get("body") or ""),
                 self._filename,
+                width,
+                code,
             )
         if self._extra:
             yield Static(_muted(self._extra), classes="muted")
@@ -1410,10 +1679,47 @@ class PromptInput(Input):
             parent.styles.height = lines + 2
             parent.styles.align = ("left", "top") if lines > 1 else ("left", "middle")
 
+    @property
+    def cursor_screen_offset(self):
+        """真正的终端光标。输入法没上屏的拼音画在这里，要和插入位置重合。"""
+        from rich.cells import cell_len
+        from textual.geometry import Offset
+
+        x, y, _width, _height = self.content_region
+        scroll_x, scroll_y = self.scroll_offset
+        if not self.value:
+            return Offset(x - scroll_x, y - scroll_y)
+        lines = self.value.split("\n")
+        line, col = self._line_col(self.cursor_position)
+        max_lines = 6
+        start = 0
+        if len(lines) > max_lines:
+            start = max(0, min(line - max_lines + 1, len(lines) - max_lines))
+        text = lines[line]
+        cell = cell_len(text[:col])
+        if col >= len(text):
+            cell += 1
+        return Offset(x + cell - scroll_x, y + (line - start) - scroll_y)
+
     def render_line(self, y: int):
         from rich.text import Text
         from textual.strip import Strip
 
+        if not self.value and self.has_focus:
+            if y != 0:
+                return Strip.blank(self.size.width, self.rich_style)
+            cursor = Text(" ", end="")
+            if self._cursor_visible:
+                cursor.stylize(self.get_component_rich_style("input--cursor"), 0, 1)
+            width = self.scrollable_content_region.width
+            segments = list(
+                self.app.console.render(
+                    cursor,
+                    self.app.console_options.update_width(max(width, 1)),
+                )
+            )
+            strip = Strip(segments).crop(0, width).extend_cell_length(width)
+            return strip.apply_style(self.rich_style)
         if "\n" not in self.value:
             return super().render_line(y)
         lines = self.value.split("\n")
@@ -2084,6 +2390,7 @@ class SparkTui(App):
     #setup-menu ModelOption:hover,
     #setup-menu ModelOption.-selected {
         background: $menu-on;
+        text-style: bold;
     }
     #setup-note {
         display: none;
@@ -2124,7 +2431,7 @@ class SparkTui(App):
     #approval ApprovalOption {
         height: 1;
         width: 100%;
-        padding: 0 1;
+        padding: 0;
         color: $text;
         background: $banner;
     }
@@ -2154,7 +2461,7 @@ class SparkTui(App):
         margin: 1 0 1 0;
         color: $muted;
         background: $page;
-        padding: 0 1;
+        padding: 0 1 0 2;
     }
     #prompt-wrap {
         height: 3;
@@ -2439,6 +2746,9 @@ class SparkTui(App):
         restart: bool = False,
         t0: Optional[float] = None,
     ) -> None:
+        if kind == "think":
+            self._clear_activity()
+            return
         if t0 is not None:
             self._activity_t0 = t0
         elif restart or kind != self._activity_kind or self._activity_t0 is None:
@@ -2466,17 +2776,10 @@ class SparkTui(App):
     def _paint_activity(self) -> None:
         if self._activity_t0 is None or not self._activity_label:
             return
-        t0 = self._activity_t0
-        if self._activity_kind == "think" and self._think_t0 is not None:
-            t0 = self._think_t0
-        elapsed = format_wait(time.monotonic() - t0)
+        elapsed = format_wait(time.monotonic() - self._activity_t0)
         try:
             bar = self.query_one("#activity", Static)
         except Exception:
-            return
-        if self._activity_kind == "think" and self._thought is not None:
-            on = int(time.monotonic() * 2) % 2 == 0
-            bar.update(_think_mark(on))
             return
         bar.update(f"{self._activity_label}... {elapsed}")
 
@@ -2704,7 +3007,17 @@ class SparkTui(App):
             extra = str(event.get("extra") or "")
             path = str(event.get("path") or "")
             if rows or extra:
-                self._turn.mount(DiffBlock(rows, extra=extra, filename=path))
+                before = event.get("before")
+                after = event.get("after")
+                self._turn.mount(
+                    DiffBlock(
+                        rows,
+                        extra=extra,
+                        filename=path,
+                        before=before if isinstance(before, str) else None,
+                        after=after if isinstance(after, str) else None,
+                    )
+                )
                 self._scroll_follow()
         elif kind == "context":
             self._context_used = int(event.get("used") or 0)
@@ -3561,7 +3874,7 @@ class SparkTui(App):
 
     def _paint_approval(self) -> None:
         for option in self.query("#approval ApprovalOption"):
-            option.set_class(option.option_index == self._approval_index, "-selected")
+            option.set_selected(option.option_index == self._approval_index)
 
     def hover_approval(self, index: int) -> None:
         if self._approval_future is None or not self._approval_options:
@@ -3578,8 +3891,7 @@ class SparkTui(App):
         bar.mount(ApprovalHead(text))
         for index, (action, label) in enumerate(self._approval_options):
             option = ApprovalOption(index, action, label)
-            if index == 0:
-                option.add_class("-selected")
+            option.set_selected(index == 0)
             bar.mount(option)
         bar.add_class("-open")
         self._set_activity("approval", "waiting for approval", restart=True)

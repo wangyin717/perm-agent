@@ -203,6 +203,24 @@ def test_help_lists_one_command_per_row():
     asyncio.run(_run())
 
 
+def test_empty_prompt_cursor_sits_at_the_start(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+
+    async def _run() -> None:
+        app = SparkTui("cursor", "/tmp/spark-agent-tui-cursor")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptInput)
+            assert prompt.value == ""
+            assert prompt.cursor_screen_offset.x == prompt.content_region.x
+            assert "Message" not in prompt.render_line(0).text
+            prompt.value = "hi"
+            prompt.cursor_position = 2
+            assert prompt.cursor_screen_offset.x == prompt.content_region.x + 3
+
+    asyncio.run(_run())
+
+
 def test_model_menu_is_one_list_and_marks_current(monkeypatch):
     from agent_loop.cli.tui import ModelOption
     from agent_loop.llm.deepseek import DeepSeekLLM
@@ -226,6 +244,8 @@ def test_model_menu_is_one_list_and_marks_current(monkeypatch):
                 "glm-5.3",
             ]
             assert plains[0].startswith("› ")
+            assert rows[0].render().spans[0].style.bold
+            assert not rows[1].render().spans[0].style.bold
             assert "deepseek-flash (current)" in plains[0]
             assert "Fast. Reads images." in plains[0]
             assert plains[1].startswith("  ")
@@ -272,23 +292,23 @@ def test_activity_line_above_the_prompt_tracks_wait_think_and_tool():
             label = app.query_one("#activity")
             assert label.has_class("-open")
             assert str(label.content) == "waiting for response... 14s"
-            app._handle_event(
-                {"kind": "assistant_delta", "text": "想一下", "channel": "reasoning"}
-            )
-            app._think_t0 = __import__("time").monotonic() - 1.4
-            app._activity_t0 = app._think_t0
-            app._tick_think()
-            await pilot.pause()
-            mark = str(app.query_one("#activity").content)
-            assert "thinking" not in mark.lower()
-            assert "◆" in mark
-            assert "1.4s" in str(app._thought.content)
             assert label.region.y < app.query_one("#prompt-wrap").region.y
             app._handle_event(
                 {"kind": "assistant_delta", "text": "想一下", "channel": "reasoning"}
             )
+            app._think_t0 = __import__("time").monotonic() - 1.4
+            app._tick_think()
             await pilot.pause()
-            assert "◆" in str(app.query_one("#activity").content)
+            mark = str(app.query_one("#activity").content)
+            assert not label.has_class("-open")
+            assert "thinking" not in mark.lower()
+            assert "◆" not in mark
+            assert "1.4s" in str(app._thought.content)
+            app._handle_event(
+                {"kind": "assistant_delta", "text": "想一下", "channel": "reasoning"}
+            )
+            await pilot.pause()
+            assert not app.query_one("#activity").has_class("-open")
             app._handle_event(
                 {"kind": "tool_start", "name": "browser_exec", "args": {"code": "page_info()"}}
             )
@@ -1205,7 +1225,11 @@ def test_approval_list_moves_with_the_keyboard():
             from agent_loop.cli.tui import ApprovalOption
 
             labels = [str(option.content) for option in app.query("#approval ApprovalOption")]
-            assert labels == ["Allow once", "yes, and always approve", "Deny"]
+            assert labels == [
+                "● Allow once",
+                "○ yes, and always approve",
+                "○ Deny",
+            ]
             assert app.query("#approval ApprovalOption")[0].has_class("-selected")
             mark = app.query_one("#approval WaitingMark")
             assert mark._timer is not None

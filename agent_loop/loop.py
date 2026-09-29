@@ -31,7 +31,7 @@ from agent_loop.recover import (
 )
 from agent_loop.session_log import SessionLog, session_log_path
 from agent_loop.runtime.tool_concurrency import run_tool_calls, terminate_cutoff
-from agent_loop.runtime.tool_runtime import ToolRuntime
+from agent_loop.runtime.tool_runtime import ToolRuntime, is_user_denied
 from agent_loop.runtime.records import new_result_id
 from agent_loop.cli.trace import log_context, log_llm_text, log_llm_tools, log_user
 from agent_loop.session_title import ensure_auto_title
@@ -312,13 +312,23 @@ class ReactAgentLoop(AgentLoop):
                     # 这里把拼好的整句发给界面。
                     log_llm_text(response.text or "")
                     log_llm_tools(response.tool_calls)
-                    await self._handle_tool_calls(
+                    denied = await self._handle_tool_calls(
                         messages,
                         response,
                         assistant_id,
                         tracker,
                         supports_images=getattr(llm, "supports_images", False),
                     )
+                    if denied:
+                        # 拒绝只停这一轮。补一条 assistant，避免下次启动把停在 tool_result
+                        # 的日志当成还没说完、自动再叫模型。
+                        note = "Stopped."
+                        messages.append({"role": "assistant", "content": note})
+                        self._log.append_entry("assistant", id=new_result_id(), content=note)
+                        log_llm_text(note)
+                        final_text = note
+                        has_more_tools = False
+                        continue
                     has_more_tools = True
                     continue
                 text = response.text or ""
@@ -420,10 +430,11 @@ class ReactAgentLoop(AgentLoop):
         assistant_id: str,
         tracker: ContextUsageTracker,
         supports_images: bool = False,
-    ) -> None:
+    ) -> bool:
         """把 assistant 的 tool_calls 跑完，结果追加进 messages。
 
-        一批全部执行（路径锁并发）。terminate 只截断喂给模型的 messages，
+        用户拒绝时同批剩余调用不执行，返回 True，调用方结束这一轮。
+        其余情况一批全部执行（路径锁并发）。terminate 只截断喂给模型的 messages，
         jsonl 照实保留所有已执行的 tool_result。assistant.tool_calls 在内存里
         裁到与保留的 result 对齐，避免下一枪缺 tool message。
         """
@@ -444,6 +455,7 @@ class ReactAgentLoop(AgentLoop):
             tool_calls=tool_calls,
         )
         results = await run_tool_calls(self.runtime, tool_calls)
+        denied = any(is_user_denied(result) for result in results)
         cut = terminate_cutoff(results)
         assistant_msg["tool_calls"] = tool_calls[:cut]
         if not assistant_msg["tool_calls"]:
@@ -466,6 +478,7 @@ class ReactAgentLoop(AgentLoop):
                 messages.append(msg)
                 if msg.get("role") == "tool":
                     tracker.add_estimate(msg)
+        return denied
 
 
 def _listen_sigint(abort: Abort):

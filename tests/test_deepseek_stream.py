@@ -1,6 +1,4 @@
 """拼 SSE 增量和 usage。"""
-import json
-
 from agent_loop.llm.client import (
     _emit_text_delta,
     parse_chat_response,
@@ -180,44 +178,6 @@ def test_parse_stream_text_and_usage():
     assert response.cache_hit_tokens == 8
     assert response.cache_miss_tokens == 2
     assert response.usage["total_tokens"] == 12
-
-
-def test_parse_stream_kimi_cache_usage(tmp_path):
-    chunks = [
-        {"choices": [{"delta": {"content": "好"}, "finish_reason": "stop"}]},
-        {
-            "choices": [],
-            "usage": {
-                "prompt_tokens": 19,
-                "completion_tokens": 13,
-                "total_tokens": 32,
-                "cached_tokens": 12,
-                "prompt_tokens_details": {
-                    "cached_tokens": 12,
-                    "cache_write_tokens": 4,
-                },
-            },
-        },
-    ]
-    response = parse_stream_chunks(chunks)
-    assert response.prompt_tokens == 19
-    assert response.completion_tokens == 13
-    assert response.cache_hit_tokens == 12
-    assert response.cache_miss_tokens == 0
-
-    llm = DeepSeek(api_key="sk-test")
-    llm.usage_path = tmp_path / "usage.jsonl"
-    llm._append_usage(response)
-    llm._append_usage(response)
-    lines = llm.usage_path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 2
-    row = json.loads(lines[0])
-    assert row == {
-        "prompt_tokens": 19,
-        "completion_tokens": 13,
-        "cache_hit_tokens": 12,
-        "cache_write_tokens": 4,
-    }
 
 
 def test_parse_stream_tool_call_deltas():

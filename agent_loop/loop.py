@@ -109,7 +109,13 @@ class ReactAgentLoop(AgentLoop):
         if self._llm is None:
             load_dotenv()
             self._llm = make_client()
+        self._bind_usage_log(self._llm)
         return self._llm
+
+    def _bind_usage_log(self, llm: ChatClient) -> None:
+        """每次成功的模型调用把用量追加到会话目录的 usage.jsonl。"""
+        if self._log is not None:
+            llm.usage_path = self._log.path.parent / "usage.jsonl"
 
     def set_model(self, model_id: str) -> str:
         from agent_loop.llm.models import save_model
@@ -118,6 +124,7 @@ class ReactAgentLoop(AgentLoop):
         if self._llm is not None:
             load_dotenv()
             self._llm = make_client(model_id)
+            self._bind_usage_log(self._llm)
         return model_id
 
     def _seed_title(self, user_action_data: Dict[str, Any], hint: str = "") -> None:

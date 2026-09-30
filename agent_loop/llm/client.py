@@ -7,6 +7,7 @@ import json
 import logging
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 import aiohttp
@@ -137,6 +138,8 @@ class ChatClient:
         # 只约束「等到第一块流式数据」。流开始之后的上限是 STREAM_TIMEOUT_SEC。
         self.timeout = timeout
         self.context_window = context_window_for(self.model)
+        # 设了就在每次成功调用后追加一行用量。不设则只留在这次响应上。
+        self.usage_path: Optional[Path] = None
 
     def use(self, model_id: str) -> str:
         from agent_loop.llm.models import canonical_model, context_window_for, module_for
@@ -191,7 +194,9 @@ class ChatClient:
                 raise RetryCancelledError()
             try:
                 chunks = await self._stream(payload, abort, on_delta=on_delta)
-                return parse_stream_chunks(chunks)
+                response = parse_stream_chunks(chunks)
+                self._append_usage(response)
+                return response
             except RetryCancelledError:
                 # Ctrl+C 打断的，不算"可重试的服务端错误"，直接向上传播。
                 raise
@@ -213,6 +218,34 @@ class ChatClient:
                 )
                 await _abortable_sleep(delay, abort)
         raise last_exc  # pragma: no cover
+
+    def _append_usage(self, response: LLMResponse) -> None:
+        """把这一次调用的用量追加到 usage_path。摘要和记忆整理走同一个客户端，也会记上。"""
+        path = self.usage_path
+        if path is None:
+            return
+        prompt = int(response.prompt_tokens or 0)
+        completion = int(response.completion_tokens or 0)
+        if prompt == 0 and completion == 0:
+            return
+        usage = response.usage if isinstance(response.usage, dict) else {}
+        details = usage.get("prompt_tokens_details")
+        cache_write = 0
+        if isinstance(details, dict):
+            cache_write = int(details.get("cache_write_tokens") or 0)
+        row = {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "cache_hit_tokens": int(response.cache_hit_tokens or 0),
+            "cache_write_tokens": cache_write,
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                handle.flush()
+        except OSError as exc:
+            logging.warning("[llm] could not append usage: %s", exc)
 
     async def _stream(
         self,
@@ -378,13 +411,25 @@ async def _iter_sse_json(
                 logging.warning("[llm] skip bad sse chunk: %s", payload[:200])
 
 
+def _cache_hit_tokens(usage: Dict[str, Any]) -> int:
+    """DeepSeek 用 prompt_cache_hit_tokens。Kimi 用 cached_tokens，明细在 prompt_tokens_details。"""
+    if usage.get("prompt_cache_hit_tokens") is not None:
+        return int(usage.get("prompt_cache_hit_tokens") or 0)
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict) and details.get("cached_tokens") is not None:
+        return int(details.get("cached_tokens") or 0)
+    if usage.get("cached_tokens") is not None:
+        return int(usage.get("cached_tokens") or 0)
+    return 0
+
+
 def _with_usage(response: LLMResponse, usage: Optional[Dict[str, Any]]) -> LLMResponse:
     if not usage:
         return response
     response.usage = usage
     response.prompt_tokens = int(usage.get("prompt_tokens") or 0)
     response.completion_tokens = int(usage.get("completion_tokens") or 0)
-    response.cache_hit_tokens = int(usage.get("prompt_cache_hit_tokens") or 0)
+    response.cache_hit_tokens = _cache_hit_tokens(usage)
     response.cache_miss_tokens = int(usage.get("prompt_cache_miss_tokens") or 0)
     return response
 

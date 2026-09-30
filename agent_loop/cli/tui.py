@@ -3761,7 +3761,7 @@ class SparkTui(App):
         hits = matching_slash(prefix)
         if not hits:
             menu.close()
-            self.query_one("#prompt", Input).set_class(True, "-slash-cmd")
+            self.query_one("#prompt", Input).set_class(False, "-slash-cmd")
             self._sync_slash_suggestion()
             return
         menu.show(hits, prefix)

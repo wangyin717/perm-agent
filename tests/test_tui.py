@@ -645,6 +645,13 @@ def test_slash_menu_filters_and_tab_completes(tmp_path, monkeypatch):
             assert prompt.value == "/rename "
             assert not app.query_one("#slash-menu", SlashMenu).is_open
 
+            prompt.value = "/adsdsdsad"
+            await pilot.pause()
+            menu = app.query_one("#slash-menu", SlashMenu)
+            assert not menu.is_open
+            assert "-slash-cmd" not in prompt.classes
+            assert list(app.query(SlashRow)) == []
+
     asyncio.run(_run())
 
 

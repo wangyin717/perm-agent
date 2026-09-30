@@ -95,7 +95,7 @@ def test_kimi_switches_endpoint_and_keeps_fixed_sampling(monkeypatch):
     assert payload["tool_choice"] == "auto"
     assert "temperature" not in payload
     assert "top_p" not in payload
-    assert "stream_options" not in payload
+    assert payload["stream_options"] == {"include_usage": True}
     assert "thinking" not in payload
     asyncio.run(llm.call([{"role": "user", "content": "hi"}], max_tokens=400))
     assert seen["payload"]["reasoning_effort"] == "low"
@@ -110,7 +110,7 @@ def test_kimi_switches_endpoint_and_keeps_fixed_sampling(monkeypatch):
     assert "reasoning_effort" not in payload
     assert "temperature" not in payload
     assert "top_p" not in payload
-    assert "stream_options" not in payload
+    assert payload["stream_options"] == {"include_usage": True}
     assert "thinking" not in payload
 
 

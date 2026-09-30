@@ -38,7 +38,9 @@ class Moonshot(ChatClient):
         kwargs: Dict[str, Any],
     ) -> None:
         # 不要传 temperature / top_p。Kimi 这些值是固定的，传了会报错。
+        # 不传 include_usage 时，流式响应里没有 prompt_tokens / completion_tokens。
         # K3 的思考关不掉，限长摘要用 low。K2.7 Code 只用默认思考，不传 reasoning_effort。
+        payload["stream_options"] = {"include_usage": True}
         if self.model == "kimi-k3":
             effort = kwargs.get("reasoning_effort")
             if effort is None and kwargs.get("max_tokens") is not None:

@@ -4249,7 +4249,6 @@ class SparkTui(App):
 
     def _submit_setup_text(self, text: str) -> None:
         from agent_loop.cli.setup import PROVIDER_ENV, SEARCH_ENV, default_model, save_env_key
-        from agent_loop.llm.models import save_model
 
         if self._setup_step == "apikey":
             if not text:
@@ -4257,7 +4256,8 @@ class SparkTui(App):
                 self._setup_note(f"Enter your {env_name}. Esc to go back.")
                 return
             save_env_key(PROVIDER_ENV[self._setup_provider], text)
-            self._model_id = save_model(default_model(self._setup_provider))
+            # 客户端在第一次请求时抄走了钥匙。这里拆掉重建，下一条才用刚保存的这把。
+            self._model_id = self.loop.set_model(default_model(self._setup_provider))
             self._refresh_chrome()
             self._show_setup_categories()
             return

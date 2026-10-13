@@ -4,7 +4,8 @@
 回合中途只在下一枪估算已经 ≥100%（会超窗）时才压。
 
   ≥80%  回合结束进场。只追加、不改历史，直到这条线。
-  microcompact  先清最近 10% 之外、REPLAY=="safe" 的旧 tool_result，换成占位符。
+  microcompact  先清最近 10% 之外的旧图，以及 REPLAY=="safe" 的旧 tool_result。
+                 旧图不再把 base64 放进下一次请求，改成一句文件还在的说明。
   ≤30%  收工。micro 之后够瘦就不再摘要。
   summary       仍 >30%：前面变摘要，最近 10% 完整轮次原样留（至少一轮）。
   仍 >30%       最后一轮自己太大，认栽继续，不再压。
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -82,7 +84,7 @@ class ContextUsageTracker:
     真实 usage 只在每次 llm.call 之后才知道。update_from_response 用
     prompt+completion 覆盖 known_tokens——completion 就是即将进入下一枪
     prompt 的 assistant 消息。两次真实调用之间只把 completion 里没有的
-    新消息（steer / tool_result）用 chars//4 补上，不要再估一遍 assistant。
+    新消息（steer / tool_result）用本地估算补上，不要再估一遍 assistant。
     """
 
     context_window: int
@@ -116,15 +118,26 @@ class ContextUsageTracker:
         return self.known_tokens / self.context_window
 
 
+# DeepSeek 一张图大约记 1024 token。base64 按字符/4 会把一张截图估成几十万。
+_IMAGE_DATA_URL = re.compile(r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+")
+IMAGE_TOKEN_ESTIMATE = 1024
+
+
 def estimate_tokens(obj: Any) -> int:
-    """chars//4 的粗略启发式（和 grok-build 的做法一致）。不追求精确，只用来在两次
-    真实 usage 之间填补空白，误差会在下一次 llm.call 后被 update_from_response 校准掉。
+    """两次真实 usage 之间的粗略估算。文字按 chars//4。
+
+    data:image/...;base64,... 整段按一张图 1024 token 计，不按 base64 长度。
+    下一枪 llm.call 的 usage 会把 known_tokens 校准成真实值。
     """
     try:
         text = obj if isinstance(obj, str) else json.dumps(obj, ensure_ascii=False, default=str)
     except Exception:
         text = str(obj)
-    return max(len(text) // 4, 0)
+    found = _IMAGE_DATA_URL.findall(text)
+    if not found:
+        return max(len(text) // 4, 0)
+    text = _IMAGE_DATA_URL.sub("", text)
+    return max(len(text) // 4, 0) + IMAGE_TOKEN_ESTIMATE * len(found)
 
 
 def _reproject(
@@ -305,8 +318,20 @@ def _keep_tail_start(entries: List[Dict[str, Any]], context_window: int) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _image_path(row: Dict[str, Any]) -> str:
+    """工具结果上挂的图片路径。没有则是空串。"""
+    media = row.get("media")
+    items = media if isinstance(media, list) else [media]
+    for item in items:
+        if isinstance(item, dict) and item.get("kind") == "image":
+            path = str(item.get("path") or "").strip()
+            if path:
+                return path
+    return ""
+
+
 def run_microcompact(log: SessionLog, rows: List[Dict[str, Any]], context_window: int) -> int:
-    """清理 keep 尾巴之外、REPLAY=="safe" 的旧 tool_result。返回清理条数。"""
+    """清理 keep 尾巴之外的旧图，以及 REPLAY=="safe" 的长 tool_result。返回清理条数。"""
     if not context_window:
         return 0
     covers_upto_seq, _ = latest_compaction_summary(rows)
@@ -333,25 +358,34 @@ def run_microcompact(log: SessionLog, rows: List[Dict[str, Any]], context_window
         if not result_id or result_id in redactions:
             continue
         content = row.get("content") or ""
-        if len(content) < MIN_REDACT_CHARS:
-            continue
+        image_path = _image_path(row)
         tool = get_tool(row.get("tool_name") or "")
-        if tool is None or getattr(tool, "REPLAY", "never") != "safe":
-            continue
-        started = started_by_result_id.get(result_id)
-        args_hint = summarize_args((started or {}).get("effective_args") or {})
-        placeholder = (
-            f"[content redacted, call {row.get('tool_name')} again to restore] {args_hint}".strip()
+        safe_long = (
+            len(content) >= MIN_REDACT_CHARS
+            and tool is not None
+            and getattr(tool, "REPLAY", "never") == "safe"
         )
+        if not image_path and not safe_long:
+            continue
+        parts: List[str] = []
+        if image_path:
+            parts.append(f"[image omitted, file still at {image_path}]")
+        if safe_long:
+            started = started_by_result_id.get(result_id)
+            args_hint = summarize_args((started or {}).get("effective_args") or {})
+            parts.append(
+                f"[content redacted, call {row.get('tool_name')} again to restore] {args_hint}".strip()
+            )
         log.append_entry(
             "tool_result_redacted",
             result_id=result_id,
-            content=placeholder,
+            content=" ".join(parts),
         )
         logging.debug(
-            "[compaction:microcompact] redacted result_id=%s tool=%s (%d chars freed)",
+            "[compaction:microcompact] redacted result_id=%s tool=%s image=%s (%d chars freed)",
             result_id,
             row.get("tool_name"),
+            bool(image_path),
             len(content),
         )
         cleared += 1

@@ -46,6 +46,13 @@ with open(os.path.join(_DIR, "tools", "tool_schemas.json"), encoding="utf-8") as
     TOOL_SCHEMAS = json.load(_f)
 
 
+def _reasoning_log_fields(response) -> Dict[str, Any]:
+    details = getattr(response, "reasoning_details", None) or []
+    if details:
+        return {"reasoning_details": details}
+    return {}
+
+
 class AgentLoop:
     """执行引擎：把一次请求跑成一个回复 Post。对外等价于 ReActAgent。"""
 
@@ -335,7 +342,12 @@ class ReactAgentLoop(AgentLoop):
                 if text.strip():
                     empty_retries = 0
                     log_llm_text(text)
-                    self._log.append_entry("assistant", id=assistant_id, content=text)
+                    self._log.append_entry(
+                        "assistant",
+                        id=assistant_id,
+                        content=text,
+                        **_reasoning_log_fields(response),
+                    )
                     final_text = text
                     has_more_tools = False
                     continue
@@ -443,6 +455,7 @@ class ReactAgentLoop(AgentLoop):
             "role": "assistant",
             "content": response.text or "",
             "tool_calls": list(tool_calls),
+            **_reasoning_log_fields(response),
         }
         # 先落盘 assistant 消息本身，再跑工具——即便工具执行中途进程崩溃，
         # jsonl 里已经有这条 assistant+tool_calls，recover.py 能认出该走 resume_tools。
@@ -453,6 +466,7 @@ class ReactAgentLoop(AgentLoop):
             id=assistant_id,
             content=response.text or "",
             tool_calls=tool_calls,
+            **_reasoning_log_fields(response),
         )
         results = await run_tool_calls(self.runtime, tool_calls)
         denied = any(is_user_denied(result) for result in results)

@@ -1,4 +1,4 @@
-"""把三家的模型名单收成一份，并按模型名选出该用哪一家。"""
+"""把各家的模型名单收成一份，并按模型名选出该用哪一家。"""
 
 from __future__ import annotations
 
@@ -6,13 +6,14 @@ import os
 from typing import Optional
 
 import agent_loop.llm.deepseek as deepseek
+import agent_loop.llm.minimax as minimax
 import agent_loop.llm.moonshot as moonshot
 import agent_loop.llm.zhipuai as zhipuai
 
 DEFAULT_CONTEXT_WINDOW = 1_000_000
 DEFAULT_MODEL = "deepseek-flash"
 
-_MODULES = (deepseek, zhipuai, moonshot)
+_MODULES = (deepseek, zhipuai, moonshot, minimax)
 MODEL_CHOICES = tuple(item for mod in _MODULES for item in mod.MODEL_CHOICES)
 _ALIASES: dict = {}
 CONTEXT_WINDOWS: dict = {}

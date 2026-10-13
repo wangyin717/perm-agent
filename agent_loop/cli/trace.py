@@ -204,10 +204,24 @@ def log_memory(
     _emit(f"[memory:{kind}] {result}{extra}{more}{q}\n\n")
 
 
+def compaction_percent(ratio: float) -> str:
+    """界面上的压缩百分比，封顶 100。内部比例可以高于 1，用来判断要不要压。"""
+    try:
+        value = float(ratio)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value < 0:
+        value = 0.0
+    elif value > 1:
+        value = 1.0
+    return f"{value * 100:.0f}"
+
+
 def log_compaction(level: str, before_ratio: float, after_ratio: float) -> None:
     _events.emit("compaction", level=level, before=before_ratio, after=after_ratio)
     _emit(
-        f"[compaction:{level}] {before_ratio * 100:.0f}% -> {after_ratio * 100:.0f}%\n\n"
+        f"[compaction:{level}] {compaction_percent(before_ratio)}% -> "
+        f"{compaction_percent(after_ratio)}%\n\n"
     )
 
 

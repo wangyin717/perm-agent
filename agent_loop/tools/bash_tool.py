@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import re
 import subprocess
@@ -82,6 +81,8 @@ MAX_LINES = 2000
 MAX_BYTES = 50 * 1024
 HEAD_LINES = 200
 TAIL_LINES = 1800
+# 本机命令到点后还要杀进程、收回管道里的输出。外层多等这几秒，避免先放弃等待。
+_TIMEOUT_SLACK = 5
 
 
 async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_dir=None) -> str:
@@ -96,18 +97,35 @@ def _bash_env() -> dict:
     return env
 
 
+def _as_text(data: Any) -> str:
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return str(data)
+
+
 def _local_run(cmd: str, timeout: float = 120):
-    completed = subprocess.run(
-        ["bash", "-lc", cmd],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=_bash_env(),
-    )
+    try:
+        completed = subprocess.run(
+            ["bash", "-lc", cmd],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=_bash_env(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return SimpleNamespace(
+            stdout=_as_text(exc.stdout),
+            stderr=_as_text(exc.stderr),
+            exit_code=None,
+            timed_out=True,
+        )
     return SimpleNamespace(
         stdout=completed.stdout or "",
         stderr=completed.stderr or "",
         exit_code=completed.returncode,
+        timed_out=False,
     )
 
 
@@ -122,17 +140,14 @@ async def run_bash(
     cmd = (cmd or "").strip()
     if not cmd:
         raise ValueError("cmd 为空")
-    try:
-        result = await _run_once(sandbox, cmd, timeout)
-    except RuntimeError as exc:
-        if "timed out" not in str(exc):
-            raise
-        logging.warning("[bash] 超时，用同一命令重试 1 次")
-        result = await _run_once(sandbox, cmd, timeout)
+    result = await _run_once(sandbox, cmd, timeout)
     output = ((result.stdout or "") + (result.stderr or "")).strip()
+    shown = _preview_and_spill(output, session_dir, workspace) if output else ""
+    if getattr(result, "timed_out", False):
+        note = f"Command timed out after {timeout} seconds"
+        raise RuntimeError(f"{shown}\n\n{note}" if shown else note)
     if not output and not result.exit_code:
         return f"命令执行完毕（退出码 {result.exit_code}）"
-    shown = _preview_and_spill(output or "", session_dir, workspace)
     if result.exit_code:
         raise RuntimeError(shown or f"Command exited with code {result.exit_code}")
     return shown
@@ -216,17 +231,27 @@ def _write_output(session_dir: str, workspace: Optional[str], full: str) -> str:
 
 async def _run_once(sandbox, cmd: str, timeout: float):
     runner = sandbox.commands.run if sandbox is not None else _local_run
+    # 沙箱到点就停。本机要等 subprocess 杀完进程并把管道里的输出带回来。
+    outer = timeout if sandbox is not None else timeout + _TIMEOUT_SLACK
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(runner, cmd, timeout=timeout),
-            timeout=timeout,
+            timeout=outer,
         )
     except asyncio.TimeoutError:
         raise RuntimeError(f"Command timed out after {timeout} seconds") from None
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Command timed out after {timeout} seconds") from None
+    except subprocess.TimeoutExpired as exc:
+        return SimpleNamespace(
+            stdout=_as_text(exc.stdout),
+            stderr=_as_text(exc.stderr),
+            exit_code=None,
+            timed_out=True,
+        )
     except Exception as exc:
         name = type(exc).__name__.lower()
-        if "timeout" in name or "timed out" in str(exc).lower():
+        text = str(exc).strip()
+        if "timeout" in name or "timed out" in text.lower():
+            if text.startswith("Command timed out after"):
+                raise
             raise RuntimeError(f"Command timed out after {timeout} seconds") from exc
         raise

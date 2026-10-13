@@ -291,7 +291,7 @@ v1 **一个工具** `memory_search`：
 | `SUCCESS_RATIO` | 30% | 收工线 |
 | `KEEP_TAIL_RATIO` | 10% | 最近这段完整轮次原样留（对齐到 user 边界，至少一轮） |
 
-**microcompact**：只抠 keep 切点之外、`REPLAY==safe`、≥800 字符的旧 `read`/`grep`/`bash` 正文，换成可再调用的占位符。不删消息、不拆 tool 配对。write/edit（`REPLAY=never`）和短结果不动。micro 经常到不了 30%（骨架、最近 10%、tool_call arguments 都还在），这是预期；它给 summary 当 prelude。
+**microcompact**：抠 keep 切点之外的两类旧 `tool_result`。一是带图片的结果（含浏览器截图）：下次请求不再放 base64，正文改成文件仍在该路径的一句说明。二是 `REPLAY==safe` 且 ≥800 字符的旧 `read`/`grep`/`bash` 正文，换成可再调用的占位符。不删消息、不拆 tool 配对。切点以内的图、用户自己贴在话里的图、write/edit（`REPLAY=never`）的纯文本、短的纯文本结果都不动。micro 经常到不了 30%（骨架、最近 10%、tool_call arguments 都还在），这是预期；它给 summary 当 prelude。
 
 **summary**：keep 切点之前送给独立摘要 LLM（系统提示是「摘要助手」，不带主对话、不带 tools），结构化输出 Goal / Progress / Key decisions / Files touched / Next steps。结果写成 `compaction_summary` 纯文本，换模型也能接着用。有上一次摘要则累积更新，不并排。
 
@@ -305,7 +305,7 @@ v1 **一个工具** `memory_search`：
 - `add_estimate`：只补 completion 里没有的新消息（steer / tool_result）。**不要再估一遍 assistant**，否则 ratio 虚高。
 - 压缩落盘后 `_reproject`：保留开头的 system，再 `bootstrap`。
 
-`chars//4` 只填两次真实 usage 之间的空；下一枪 API usage 会校准。
+文字按 `chars//4`。`data:image/...;base64,...` 不按字符长度算，一张图按 1024 token（和 DeepSeek 对一张图的计价同一量级）。这只填两次真实 usage 之间的空；下一枪 API usage 会校准。`usage_ratio()` 不封顶，中途超窗仍按未封顶的比例判断。界面上的压缩百分比（结束行和过程日志）封顶 100。
 
 ---
 
@@ -342,7 +342,7 @@ Ctrl+C 是取消，不是崩溃：未关工具更合理写 interrupted，不要�
 | 欠费 402 / 401 / 400 / 文案带 quota | 立刻抛，不重试 | 有 attempt、没 assistant |
 | 进程死在 `llm.call` | 下次 `_begin_llm_step` 复用 id | 有 attempt、没 assistant |
 
-`call()` 最多 3 次（第 1 次 + 再试 2 次）。退避约 0.5s → 1s → 2s（封顶 8s）；有 `Retry-After` 听它，超过 60s 直接失败。429 文案若像欠费（quota/billing）**不重试**。
+`call()` 里：5xx、断网、超时最多 15 次（含第一次）。间隔约 2 秒起翻倍，封顶 30 秒。HTTP 429 最多 2 次（再试 1 次）；有 `Retry-After` 就等它写的秒数，也封顶 30 秒。429 文案若像欠费（quota/billing）**不重试**。次数用完后异常抛出：TUI 画一行 error，进程还在；`perm '题目'` 没有接住，进程以退出码 1 结束。
 
 Ctrl+C：`Abort` 打断退避和卡住的 POST（`RetryCancelledError`）。不新写 attempt。
 
@@ -358,15 +358,15 @@ Ctrl+C：`Abort` 打断退避和卡住的 POST（`RetryCancelledError`）。不�
 
 1. 没命令  
 2. `exit_code != 0`  
-3. 超时：同一 cmd 再跑 1 次；第二次还超时 → throw  
+3. 超时：不重试。本机杀掉进程后，把已经写进管道的 stdout/stderr 和 `Command timed out after N seconds` 一起 throw。还没写进管道的内容（例如 Python 没 flush 的 print）拿不到。
 
-非 0 / 空 cmd **不重试**。
+超时、非 0、空 cmd **都不重试**。
 
 拼好 stdout+stderr 之后、return 或 raise **之前**，走同一套 `_preview_and_spill`（成功失败都算）。否则 pytest 栈会变成异常正文整份进模型。
 
 活着失败：当场关单。只有进程死在 execute 里，才留给 `inspect_log`。
 
-`asyncio.to_thread` + `wait_for`：本机 `subprocess.run(..., timeout=)` 超时会杀子进程；`wait_for` 仍杀不掉线程里卡住的调用。真要停远端沙箱里的命令，还没做（现在默认不走 E2B）。
+`asyncio.to_thread` + `wait_for`：本机 `subprocess.run(..., timeout=)` 超时会杀直接子进程，并把已有输出带回。外层 `wait_for` 比这个 timeout 多等几秒，避免先放弃等待、把输出丢在线程里。沙箱路径的 `wait_for` 仍等于 timeout，杀不掉线程里卡住的调用。真要停远端沙箱里的命令，还没做（现在默认不走 E2B）。
 
 ---
 
@@ -445,7 +445,7 @@ read 分页是「全文进内存再切一页给模型」。默认也可能只返
 
 `cli/tui.py` 订 `events`，不改 jsonl。`uv run perm` 开 TUI；`-s <id> "<问题>"` 仍是一次性 CLI。须用项目 `.venv`。界面名叫 Permanent。Python logging 和 browser-use MCP 的 stderr 写在当前会话目录：`chats/{id}/permanent.log`、`chats/{id}/browser-use-mcp.log`（TUI 不打到终端）。 `/new` `/resume` 会换到新会话的日志文件。空会话居中一张浅框：左边永恒号（环状模块舱），右边 `/new` `/resume` `/help`。`/new` 开空白会话；`/resume` 列出本项目会话（每页 10 条，点行或 ↑↓ 加回车进入，←→ 翻页），也可用 `/resume 1` 或 `/resume <id>`。标题在 `chats/{id}/title.json`（目录名仍是 id）：首条用户话自动写入，`/rename` 记 `title_is_manual`。粘贴/拖入绝对图片路径或剪贴板位图变成 `[Image #N]`，文件落在 `chats/{id}/input/images/`；user entry 记 `media.path`，投影时挂在这条 user 上。散文里的路径不当图。时间线滚动立刻跳（关掉 Textual 默认惯性动画），滚轮一次 4 行。
 
-过程行：灰色菱形 + 加粗动词。工具还在跑时，这一行的菱形在实心和空心之间闪，右边是已经用了的秒数；跑完菱形停住，不足 1 秒不留秒数。流式思维链在时间线实时走 `Thinking… Xs`，该段结束落下 `Thought for Xs`，不展开思考原文。没有正文、而且不到 1 秒的 Thought 不留下。下一段思考另起一行。回合结束只在时间线落一行：
+过程行：灰色菱形 + 加粗动词。工具还在跑时，这一行的菱形在实心和空心之间闪，右边是已经用了的秒数；跑完菱形停住，不足 1 秒不留秒数。流式思维链在时间线实时走 `Thinking… Xs`，菱形同样实心/空心交替；该段结束落下 `Thought for Xs`，菱形停在实心，不展开思考原文。没有正文、而且不到 1 秒的 Thought 不留下。下一段思考另起一行。回合结束只在时间线落一行：
 
 `Worked for 1m41s | deepseek-flash | 112K / 1M`
 

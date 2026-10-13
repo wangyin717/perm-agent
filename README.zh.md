@@ -43,6 +43,24 @@ perm
 
 网页搜索默认用 DuckDuckGo。想要更好的结果，在 `/login` 的 Web search 里填写 `PERPLEXITY_API_KEY`。
 
+### 更新
+
+用安装脚本装好之后，在终端执行：
+
+```bash
+perm update
+```
+
+这会换到 GitHub 上最新的 `vX.Y.Z` 标签。`~/.permanent` 里的对话、配置和密钥会留着。
+
+要装某一个标签：
+
+```bash
+perm update --version v0.7.1
+```
+
+打开 perm 时如果有新版本，会提示运行 `perm update`。
+
 ## 常用命令
 
 在输入框里以 `/` 开头。只输入 `/` 会列出命令，按 Tab 补全。

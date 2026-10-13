@@ -334,6 +334,9 @@ def entries_to_messages(
             "role": "assistant",
             "content": pending_assistant.get("content") or "",
         }
+        details = pending_assistant.get("reasoning_details")
+        if details:
+            msg["reasoning_details"] = details
         if calls:
             trimmed = [call for call in calls if (call.get("id") or "") in kept_ids]
             if trimmed:

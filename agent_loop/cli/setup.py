@@ -12,11 +12,13 @@ PROVIDERS = (
     ("deepseek", "DeepSeek", "", "deepseek-flash"),
     ("glm", "GLM", "", "glm-5.3-flash"),
     ("kimi", "Kimi", "", "kimi-k3"),
+    ("minimax", "MiniMax", "", "MiniMax-M3"),
 )
 PROVIDER_ENV = {
     "deepseek": "DEEPSEEK_API_KEY",
     "glm": "ZHIPU_API_KEY",
     "kimi": "MOONSHOT_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
 }
 SEARCH_ENV = "PERPLEXITY_API_KEY"
 CATEGORIES = (

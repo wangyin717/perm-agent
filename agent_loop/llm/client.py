@@ -17,9 +17,12 @@ from agent_loop.abort import Abort, RetryCancelledError
 STREAM_OPEN_TIMEOUT_SEC = 120
 STREAM_TIMEOUT_SEC = 10 * 60
 
-# 第 1 次不算重试；最多再试 2 次
-LLM_MAX_ATTEMPTS = 3
-MAX_RETRY_DELAY_SEC = 60
+# 5xx、断网、超时：第一次加上重试，最多 15 次。和 Grok 的 max_retries 一样，下一次编号到 15 就停。
+LLM_MAX_ATTEMPTS = 15
+# HTTP 429：第一次加上再试 1 次。欠费文案仍由 is_retryable_llm_error 直接拒绝。
+RATE_LIMIT_MAX_ATTEMPTS = 2
+# 间隔从 2 秒翻倍，到这里封顶。Retry-After 也不超过它。
+MAX_RETRY_BACKOFF_SEC = 30
 _BILLING_MARKERS = (
     "insufficient_quota",
     "quota exceeded",
@@ -38,9 +41,10 @@ _BILLING_MARKERS = (
 class LLMHTTPError(RuntimeError):
     """HTTP 失败。message 带上响应正文，欠费不会被 aiohttp 的 Too Many Requests 盖住。"""
 
-    def __init__(self, status: int, body: str) -> None:
+    def __init__(self, status: int, body: str, headers: Any = None) -> None:
         self.status = status
         self.body = body or ""
+        self.headers = headers
         super().__init__(f"HTTP {status}: {self.body[:500]}")
 
 
@@ -55,6 +59,7 @@ class LLMResponse:
     completion_tokens: int = 0
     cache_hit_tokens: int = 0
     cache_miss_tokens: int = 0
+    reasoning_details: list = field(default_factory=list)
 
 
 def is_retryable_llm_error(exc: BaseException) -> bool:
@@ -83,29 +88,50 @@ def is_retryable_llm_error(exc: BaseException) -> bool:
     return False
 
 
-def retry_delay_seconds(exc: BaseException, retry_index: int) -> float:
-    """retry_index=0 表示第一次重试。服务端 Retry-After 超过上限则抛错。
+def _max_attempts(exc: BaseException) -> int:
+    status = getattr(exc, "status", None)
+    if status == 429:
+        return RATE_LIMIT_MAX_ATTEMPTS
+    return LLM_MAX_ATTEMPTS
 
-    优先听服务端的 Retry-After（明确知道该等多久，不用猜）；没有的话退回本地的
-    指数退避（0.5s → 1s → 2s...，封顶 8s），加一点随机抖动避免多个请求同时醒来。
-    """
+
+def _header_delay_seconds(exc: BaseException) -> Optional[float]:
     headers = getattr(exc, "headers", None)
-    if headers is not None and hasattr(headers, "get"):
-        ms = headers.get("retry-after-ms")
-        if ms is not None:
-            delay = float(ms) / 1000.0
-        else:
-            raw = headers.get("Retry-After") or headers.get("retry-after")
-            delay = float(raw) if raw is not None else None
+    if headers is None or not hasattr(headers, "get"):
+        return None
+    ms = headers.get("retry-after-ms")
+    if ms is not None:
+        return float(ms) / 1000.0
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if raw is None:
+        return None
+    return float(raw)
+
+
+def _backoff_seconds(retry_index: int) -> float:
+    """第一次重试约 2 秒，之后翻倍，封顶 30 秒，上下浮动两成。"""
+    base = min(2.0 * (2 ** min(retry_index, 16)), MAX_RETRY_BACKOFF_SEC)
+    spread = base * 0.2
+    delay = base + (random.random() * 2 - 1) * spread
+    if delay < 0:
+        delay = 0.0
+    if delay > MAX_RETRY_BACKOFF_SEC:
+        delay = float(MAX_RETRY_BACKOFF_SEC)
+    return delay
+
+
+def retry_delay_seconds(exc: BaseException, retry_index: int) -> float:
+    """retry_index=0 表示第一次重试。
+
+    429 有 Retry-After 就等它写的秒数，最长 30 秒。没有的话，和 5xx、断网、超时一样从 2 秒翻倍。
+    """
+    if getattr(exc, "status", None) == 429:
+        delay = _header_delay_seconds(exc)
         if delay is not None:
-            if delay > MAX_RETRY_DELAY_SEC:
-                # 服务端要求等太久：宁可让上层看到明确的失败，也不要静默卡住整个 loop。
-                raise RuntimeError(
-                    f"Server requested {delay:.0f}s retry delay (max: {MAX_RETRY_DELAY_SEC}s). {exc}"
-                )
-            return delay
-    delay = min(0.5 * (2**retry_index), 8)
-    return delay * (1 - random.random() * 0.25)
+            if delay < 0:
+                delay = 0.0
+            return min(delay, float(MAX_RETRY_BACKOFF_SEC))
+    return _backoff_seconds(retry_index)
 
 
 class ChatClient:
@@ -115,6 +141,8 @@ class ChatClient:
     default_model = ""
     api_base_default = ""
     env_name = ""
+    # MiniMax 要求把 reasoning_details 带回下一轮。别的接口不认识这个字段。
+    keep_reasoning_details = False
 
     def __init__(
         self,
@@ -137,6 +165,16 @@ class ChatClient:
         # 只约束「等到第一块流式数据」。流开始之后的上限是 STREAM_TIMEOUT_SEC。
         self.timeout = timeout
         self.context_window = context_window_for(self.model)
+
+    def _outbound_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if self.keep_reasoning_details:
+            return messages
+        cleaned: List[Dict[str, Any]] = []
+        for msg in messages:
+            if isinstance(msg, dict) and "reasoning_details" in msg:
+                msg = {key: value for key, value in msg.items() if key != "reasoning_details"}
+            cleaned.append(msg)
+        return cleaned
 
     def use(self, model_id: str) -> str:
         from agent_loop.llm.models import canonical_model, context_window_for, module_for
@@ -173,7 +211,7 @@ class ChatClient:
     ) -> LLMResponse:
         payload: Dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
+            "messages": self._outbound_messages(messages),
             "stream": True,
         }
         self.prepare_payload(payload, tools, kwargs)
@@ -185,8 +223,9 @@ class ChatClient:
             payload["max_tokens"] = kwargs["max_tokens"]
 
         on_delta: Optional[Callable[..., None]] = kwargs.get("on_delta")
-        last_exc: Optional[BaseException] = None
-        for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             if abort and abort.aborted:
                 raise RetryCancelledError()
             try:
@@ -196,23 +235,21 @@ class ChatClient:
                 # Ctrl+C 打断的，不算"可重试的服务端错误"，直接向上传播。
                 raise
             except Exception as exc:
-                last_exc = exc
                 # 欠费/400/401/402 等不可重试错误，或已经打满次数：不再等，直接抛出去
                 # 让调用方（agent_loop）决定怎么处理。
-                if not is_retryable_llm_error(exc) or attempt == LLM_MAX_ATTEMPTS:
+                limit = _max_attempts(exc)
+                if not is_retryable_llm_error(exc) or attempt >= limit:
                     raise
-                retry_index = attempt - 1
-                delay = retry_delay_seconds(exc, retry_index)
+                delay = retry_delay_seconds(exc, attempt - 1)
                 logging.warning(
                     "[%s] %s，%.1fs 后重试 %s/%s",
                     type(self).__name__,
                     exc,
                     delay,
                     attempt,
-                    LLM_MAX_ATTEMPTS - 1,
+                    limit - 1,
                 )
                 await _abortable_sleep(delay, abort)
-        raise last_exc  # pragma: no cover
 
     async def _stream(
         self,
@@ -263,7 +300,7 @@ class ChatClient:
                 if resp.status >= 400:
                     body = await resp.text()
                     logging.error("[%s] HTTP %s: %s", name, resp.status, body[:500])
-                    raise LLMHTTPError(resp.status, body)
+                    raise LLMHTTPError(resp.status, body, resp.headers)
                 async for obj in _iter_sse_json(
                     resp,
                     open_deadline=started + self.timeout,
@@ -452,4 +489,35 @@ def parse_stream_chunks(chunks: List[Dict[str, Any]]) -> LLMResponse:
     else:
         response = LLMResponse(text=text, tool_calls=[], stop_reason="end_turn")
     response.finish_reason = finish_reason
+    response.reasoning_details = _merge_reasoning_details(chunks)
     return _with_usage(response, usage)
+
+
+def _merge_reasoning_details(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """把流式 reasoning_details 按 id 拼回完整的一块。每块 text 是增量。"""
+    slots: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for data in chunks:
+        choices = data.get("choices") or []
+        if not choices:
+            continue
+        delta = (choices[0] or {}).get("delta") or {}
+        for item in delta.get("reasoning_details") or []:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("id") or f"idx-{item.get('index', 0)}")
+            slot = slots.get(key)
+            if slot is None:
+                slot = {
+                    "type": item.get("type") or "reasoning.text",
+                    "id": item.get("id") or key,
+                    "format": item.get("format") or "MiniMax-response-v1",
+                    "index": item.get("index", 0),
+                    "text": "",
+                }
+                slots[key] = slot
+                order.append(key)
+            text = item.get("text")
+            if text:
+                slot["text"] += text
+    return [slots[key] for key in order]

@@ -30,11 +30,12 @@ from textual.containers import Horizontal, Vertical, VerticalGroup, VerticalScro
 from textual.markup import escape as markup_escape
 from textual.selection import Selection
 from textual.visual import RenderOptions
-from textual.events import Paste, TextSelected
+from textual.events import CursorPosition, Paste, TextSelected
 from textual.widgets import Input, Static
 
 from agent_loop import events
 from agent_loop.cli.app import CliDeps
+from agent_loop.cli.trace import compaction_percent
 from agent_loop.loop import ReactAgentLoop
 from agent_loop.paths import spark_home
 from agent_loop.tools.diff_view import clip_diff_line
@@ -401,6 +402,10 @@ def _mark(text: str) -> str:
     return f"[$muted]◆[/] {text}"
 
 
+# 思考行和工具行共用这个间隔：实心 ◆ 与空心 ◇ 交替。
+_DIAMOND_BLINK_SEC = 0.45
+
+
 def format_wait(seconds: float) -> str:
     """不到 10 秒保留一位小数，之后只显示整数秒。"""
     seconds = max(0.0, float(seconds))
@@ -429,8 +434,9 @@ def apple_terminal_newline_modifier_held() -> bool:
     return bool(flags & (0x00020000 | 0x00080000 | 0x00100000))
 
 
-def _thinking_line(dt: float) -> str:
-    return _mark(f"[bold]Thinking[/][$muted]… {format_wait(dt)}[/]")
+def _thinking_line(dt: float, *, hollow: bool = False) -> str:
+    mark = "[$mark-rest]◇[/]" if hollow else "[$muted]◆[/]"
+    return f"{mark} [bold]Thinking[/][$muted]… {format_wait(dt)}[/]"
 
 
 def _thought_line(dt: float) -> str:
@@ -1065,9 +1071,13 @@ class WaitingMark(Static):
         self._paint()
         if self._frozen:
             return
-        self._timer = self.set_interval(0.45, self._tick)
+        self._timer = self.set_interval(_DIAMOND_BLINK_SEC, self._tick)
 
     def _tick(self) -> None:
+        # 输入法正在拼音中间时先别闪。这一下重画会把光标拉回整串拼音的左边。
+        hold = getattr(self.app, "_hold_refresh_for_ime", None)
+        if callable(hold) and hold():
+            return
         self._on = not self._on
         self._paint()
 
@@ -1087,7 +1097,10 @@ class WaitingMark(Static):
             rest = self._rest
             color = colors.mark_rest if rest == "#c7c7cc" else rest
             glyph = "◇" if self._hollow else "◆"
-        self.update(f"[{color}]{glyph}[/]")
+        self.update(f"[{color}]{glyph}[/]", layout=False)
+        note = getattr(self.app, "_note_background_paint", None)
+        if callable(note):
+            note()
 
     def freeze(self) -> None:
         if self._timer is not None:
@@ -1185,6 +1198,9 @@ class RunningToolRow(Horizontal):
     def _tick(self) -> None:
         if self._frozen:
             return
+        hold = getattr(self.app, "_hold_refresh_for_ime", None)
+        if callable(hold) and hold():
+            return
         shown = format_wait(time.monotonic() - self._t0)
         if shown == self._shown:
             return
@@ -1194,7 +1210,12 @@ class RunningToolRow(Horizontal):
     def _paint_text(self, *, final: bool) -> None:
         dt = max(0.0, time.monotonic() - self._t0)
         try:
-            self.query_one(".run-text", Static).update(self._text(dt, final=final))
+            self.query_one(".run-text", Static).update(
+                self._text(dt, final=final), layout=False
+            )
+            note = getattr(self.app, "_note_background_paint", None)
+            if callable(note):
+                note()
         except Exception:
             pass
 
@@ -1526,6 +1547,7 @@ class Prose(Static):
     def __init__(self, markdown: str = "") -> None:
         self._src = markdown or ""
         self._paint_width = 80
+        self._lines: Optional[int] = None
         super().__init__(_markdown_as_text(self._src, 80), shrink=True, markup=False)
 
     def set_markdown(self, markdown: str) -> None:
@@ -1545,7 +1567,12 @@ class Prose(Static):
         if width <= 0:
             width = 80
         self._paint_width = width
-        self.update(_markdown_as_text(self._src, width))
+        rendered = _markdown_as_text(self._src, width)
+        # 行数没变就别重新排版。回复往外冒的时候整屏重排，输入框会卡。
+        lines = rendered.plain.count("\n") + 1
+        grow = lines != self._lines
+        self._lines = lines
+        self.update(rendered, layout=grow)
 
     def get_selection(self, selection: Selection) -> Optional[Tuple[str, str]]:
         visual = self._render()
@@ -1605,6 +1632,30 @@ class PromptInput(Input):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.cursor_blink = False
+
+    def _watch_value(self, value: str) -> None:
+        # 每打一个字 content_width 都变。virtual_size 一赋值就会把整屏重新排版，
+        # 对话一长，输入框就卡。宽度是固定的，这里只更新滚动宽度。
+        from textual.geometry import Size
+        from textual.widget import Widget
+
+        self.set_reactive(Widget.virtual_size, Size(self.content_width, 1))
+        self._suggestion = ""
+        if self.suggester and value:
+            self.run_worker(self.suggester._get_suggestion(self, value))
+        if self.styles.auto_dimensions:
+            self.refresh(layout=True)
+
+        validation_result = (
+            self.validate(value) if "changed" in self.validate_on else None
+        )
+        self.post_message(self.Changed(self, value, validation_result))
+
+        if self._initial_value:
+            self.cursor_position = len(self.value)
+            self._initial_value = False
+        else:
+            self.selection = self.selection
 
     def _restart_blink(self) -> None:
         self._pause_blink(visible=True)
@@ -2570,6 +2621,12 @@ class SparkTui(App):
         self._thought_buf = ""
         self._last_thought_paint = 0.0
         self._think_t0: Optional[float] = None
+        self._think_shown = ""
+        self._activity_shown = ""
+        self._ime_ahead = False
+        self._cursor_asked = 0.0
+        self._cursor_report_at = 0.0
+        self._painted_at = 0.0
         self._had_reasoning = False
         self._busy_t0: Optional[float] = None
         self._activity_kind = ""
@@ -2730,13 +2787,85 @@ class SparkTui(App):
         self._scroll_follow()
         return turn
 
+    def _busy_chrome(self) -> bool:
+        return (
+            self._activity_t0 is not None
+            or self._think_t0 is not None
+            or self._running_tool is not None
+            or (
+                bool(self._stream_buf)
+                and (self._md is None or self._md._src != self._stream_buf)
+            )
+        )
+
+    def _probe_ime_cursor(self) -> None:
+        """问终端光标现在在哪。输入法组字时它会离开插入位置，往拼音里面走。"""
+        if self.is_headless:
+            return
+        driver = self._driver
+        if driver is None:
+            return
+        now = time.monotonic()
+        if now - self._cursor_asked < 0.3:
+            return
+        self._cursor_asked = now
+        try:
+            driver.write("\x1b[6n")
+            driver.flush()
+        except Exception:
+            return
+
+    def _note_background_paint(self) -> None:
+        self._painted_at = time.monotonic()
+
+    def _hold_refresh_for_ime(self) -> bool:
+        """光标在拼音中间时先别重画。重画结束会把光标拉回这串字的最左边。
+
+        刚画完要歇一下再问光标。问的时候如果马上又画，终端报回来的还是刚被拉回去的位置。
+        """
+        if self.is_headless or self._driver is None:
+            return self._ime_ahead
+        now = time.monotonic()
+        self._probe_ime_cursor()
+        if self._ime_ahead:
+            return True
+        if self._painted_at and now - self._painted_at < 0.25:
+            return True
+        if self._cursor_report_at <= self._painted_at:
+            if self._cursor_asked and now - self._cursor_asked > 0.4:
+                return False
+            return True
+        return False
+
+    def on_cursor_position(self, event: CursorPosition) -> None:
+        anchor = self.cursor_position
+        ahead = event.y == anchor.y and event.x > anchor.x
+        was = self._ime_ahead
+        self._ime_ahead = ahead
+        self._cursor_report_at = time.monotonic()
+        if was and not ahead:
+            self._flush_stream()
+            self._tick_think()
+
     def _tick_think(self) -> None:
         if self._aborting:
+            return
+        if self._busy_chrome() and self._hold_refresh_for_ime():
             return
         if self._activity_t0 is not None:
             self._paint_activity()
         if self._thought is not None and self._think_t0 is not None:
-            self._thought.update(_thinking_line(time.monotonic() - self._think_t0))
+            dt = time.monotonic() - self._think_t0
+            hollow = int(dt / _DIAMOND_BLINK_SEC) % 2 == 1
+            line = _thinking_line(dt, hollow=hollow)
+            if line != self._think_shown:
+                self._think_shown = line
+                # 这一行高度是固定的。整屏重排会让正在打的字卡住。
+                self._thought.update(line, layout=False)
+                self._note_background_paint()
+        if self._stream_buf and (self._md is None or self._md._src != self._stream_buf):
+            self._flush_stream()
+            self._scroll_follow()
 
     def _set_activity(
         self,
@@ -2766,6 +2895,7 @@ class SparkTui(App):
         self._activity_kind = ""
         self._activity_label = ""
         self._activity_t0 = None
+        self._activity_shown = ""
         try:
             bar = self.query_one("#activity", Static)
         except Exception:
@@ -2777,11 +2907,16 @@ class SparkTui(App):
         if self._activity_t0 is None or not self._activity_label:
             return
         elapsed = format_wait(time.monotonic() - self._activity_t0)
+        text = f"{self._activity_label}... {elapsed}"
+        if text == self._activity_shown:
+            return
+        self._activity_shown = text
         try:
             bar = self.query_one("#activity", Static)
         except Exception:
             return
-        bar.update(f"{self._activity_label}... {elapsed}")
+        bar.update(text, layout=False)
+        self._note_background_paint()
 
     def _show_llm_wait(self, *, restart: bool = False) -> None:
         self._set_activity("wait", "waiting for response", restart=restart)
@@ -2803,7 +2938,8 @@ class SparkTui(App):
         self._had_reasoning = True
         self._think_t0 = time.monotonic()
         self._set_activity("think", "thinking", t0=self._think_t0)
-        self._thought = TimelineRow(_thinking_line(0.0), classes="thought")
+        self._think_shown = _thinking_line(0.0)
+        self._thought = TimelineRow(self._think_shown, classes="thought")
         self._turn.mount(self._thought)
         self._tick_think()
         self._scroll_follow()
@@ -2818,6 +2954,7 @@ class SparkTui(App):
         body = self._thought_body
         self._thought = None
         self._think_t0 = None
+        self._think_shown = ""
         self._had_reasoning = False
         self._thought_buf = ""
         self._thought_body = None
@@ -2885,6 +3022,7 @@ class SparkTui(App):
             return
         self._last_stream_paint = time.monotonic()
         self._ensure_md().set_markdown(text)
+        self._note_background_paint()
 
     def _close_prose(self) -> None:
         self._md = None
@@ -2962,10 +3100,13 @@ class SparkTui(App):
                     self._flush_stream()
                 return
             self._stream_buf += piece
+            if self._hold_refresh_for_ime():
+                return
             now = time.monotonic()
             if now - self._last_stream_paint >= 0.05:
                 self._last_stream_paint = now
                 self._ensure_md().set_markdown(self._stream_buf)
+                self._note_background_paint()
                 self._scroll_follow()
         elif kind == "assistant":
             self._clear_activity()
@@ -3141,6 +3282,10 @@ class SparkTui(App):
         """终端拖文件常常不是 Paste 事件，而是把带引号的路径打进输入框。"""
         if event.input.id != "prompt" or self._attaching_drop:
             return
+        # 拼音上屏了，光标回到正文里，刚才停着的回复可以画出来。
+        if self._ime_ahead:
+            self._ime_ahead = False
+            self._flush_stream()
         # 换图片时会先清掉路径再插入芯片，中间那次变更已经过期。
         if (event.value or "") != (event.input.value or ""):
             return
@@ -3668,9 +3813,9 @@ class SparkTui(App):
             parts.append(ctx)
         for item in self._compactions:
             level = item.get("level") or "compact"
-            before = float(item.get("before") or 0) * 100
-            after = float(item.get("after") or 0) * 100
-            parts.append(f"compacted {level} {before:.0f}% -> {after:.0f}%")
+            before = compaction_percent(item.get("before") or 0)
+            after = compaction_percent(item.get("after") or 0)
+            parts.append(f"compacted {level} {before}% -> {after}%")
         return " | ".join(parts)
 
     def _finish_turn(self) -> None:

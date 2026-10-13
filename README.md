@@ -43,6 +43,24 @@ After it opens, use `/login` to configure a model. DeepSeek is the recommended p
 
 Web search uses DuckDuckGo unless you set a key. For better results, add `PERPLEXITY_API_KEY` under Web search in `/login`.
 
+### Update
+
+If you installed with the script above, run this in a terminal:
+
+```bash
+perm update
+```
+
+That switches to the newest `vX.Y.Z` tag on GitHub. Chats, settings, and keys in `~/.permanent` stay put.
+
+To install one tag:
+
+```bash
+perm update --version v0.7.1
+```
+
+When a newer version exists, opening perm tells you to run `perm update`.
+
 ## Commands
 
 Type `/` in the input box. `/` alone lists the commands. Tab completes one.

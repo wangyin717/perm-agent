@@ -6,6 +6,7 @@ from agent_loop.llm.client import (
     retry_delay_seconds,
 )
 from agent_loop.llm.deepseek import DeepSeek
+from agent_loop.llm.minimax import MiniMax
 from agent_loop.llm.models import make_client
 from agent_loop.llm.moonshot import Moonshot
 from agent_loop.llm.zhipuai import ZhipuAI
@@ -13,6 +14,7 @@ from agent_loop.llm.zhipuai import ZhipuAI
 __all__ = [
     "DeepSeek",
     "LLMResponse",
+    "MiniMax",
     "Moonshot",
     "ZhipuAI",
     "is_retryable_llm_error",

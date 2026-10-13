@@ -1,3 +1,4 @@
+from agent_loop.llm.anthropic import AnthropicClient
 from agent_loop.llm.client import (
     LLMResponse,
     is_retryable_llm_error,
@@ -12,6 +13,7 @@ from agent_loop.llm.moonshot import Moonshot
 from agent_loop.llm.zhipuai import ZhipuAI
 
 __all__ = [
+    "AnthropicClient",
     "DeepSeek",
     "LLMResponse",
     "MiniMax",

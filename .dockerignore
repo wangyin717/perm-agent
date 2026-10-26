@@ -1,0 +1,9 @@
+.venv
+**/__pycache__
+tests
+game_test
+output
+docs
+log
+.git
+*.pyc

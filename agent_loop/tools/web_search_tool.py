@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
+from agent_loop.relay import current_relay
+
 NAME = "web_search"
 REPLAY = "safe"
 READ_ONLY = True
@@ -96,11 +98,34 @@ def format_results(
     return header + "\n\n" + "\n\n".join(blocks)
 
 
+def _search_proxy() -> tuple[str, str] | None:
+    relay = current_relay()
+    if relay is None:
+        return None
+    token, api_base = relay
+    suffix = "/perm-llm"
+    if not api_base.endswith(suffix):
+        return None
+    return token, api_base[: -len(suffix)] + "/perm-search"
+
+
 async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_dir=None) -> str:
     query = str(args.get("query") or "").strip()
     if not query:
         raise ValueError("query 为空")
     max_results = _clamp_max_results(args.get("max_results"))
+    proxy = _search_proxy()
+    if proxy is not None:
+        token, url = proxy
+        try:
+            hits = await search_perplexity(query, max_results, token, url)
+            return format_results(hits, query, backend="perplexity")
+        except PerplexitySearchError as exc:
+            if not exc.should_fallback():
+                raise
+            logging.warning("[web_search] perplexity proxy failed (%s), falling back to duckduckgo", exc)
+            hits = await search_ddgs(query, max_results)
+            return format_results(hits, query, backend="duckduckgo fallback", note=_fallback_note(exc))
     key = perplexity_key()
     if key:
         try:
@@ -142,7 +167,12 @@ def _hits_from_perplexity(data: Any) -> List[Dict[str, str]]:
     return hits
 
 
-async def search_perplexity(query: str, max_results: int, api_key: str) -> List[Dict[str, str]]:
+async def search_perplexity(
+    query: str,
+    max_results: int,
+    api_key: str,
+    url: str = PERPLEXITY_URL,
+) -> List[Dict[str, str]]:
     payload = {"query": query, "max_results": max_results}
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -151,7 +181,7 @@ async def search_perplexity(query: str, max_results: int, api_key: str) -> List[
     timeout = aiohttp.ClientTimeout(total=PERPLEXITY_TIMEOUT_SEC)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(PERPLEXITY_URL, json=payload, headers=headers) as resp:
+            async with session.post(url, json=payload, headers=headers) as resp:
                 body = await resp.text()
                 if resp.status >= 400:
                     raise PerplexitySearchError(

@@ -18,7 +18,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from agent_loop import events
 from agent_loop.paths import spark_home
 from agent_loop.plugins.config import plugin_enabled
+from agent_loop.plugins.mcp_http import McpHttpClient
 from agent_loop.plugins.mcp_stdio import McpStdioClient
+from agent_loop.relay import current_relay
 from agent_loop.runtime.records import ToolOutput
 
 BROWSER_EXEC = "browser_exec"
@@ -57,6 +59,10 @@ class PluginHost:
         self._computer_schemas: List[Dict[str, Any]] = []
         self._computer_tools: Dict[str, _PluginTool] = {}
         self._computer_names: set[str] = set()
+        self._x: Optional[McpStdioClient | McpHttpClient] = None
+        self._x_schemas: List[Dict[str, Any]] = []
+        self._x_tools: Dict[str, _PluginTool] = {}
+        self._x_names: set[str] = set()
         self._started = asyncio.Event()
         self._start_lock = asyncio.Lock()
         self._log_file = None
@@ -122,8 +128,10 @@ class PluginHost:
     async def stop(self) -> None:
         browser = self._client
         computer = self._computer
+        x_client = self._x
         self._client = None
         self._computer = None
+        self._x = None
         self._schemas = []
         self._tools = {}
         self._browser_schemas = []
@@ -131,7 +139,10 @@ class PluginHost:
         self._computer_schemas = []
         self._computer_tools = {}
         self._computer_names = set()
-        for client in (browser, computer):
+        self._x_schemas = []
+        self._x_tools = {}
+        self._x_names = set()
+        for client in (browser, computer, x_client):
             if client is not None:
                 await client.close()
         for handle in (self._log_file, self._computer_log):
@@ -164,6 +175,8 @@ class PluginHost:
     async def call_tool(self, name: str, args: Dict[str, Any], session_dir: Optional[str] = None) -> Any:
         if name == COMPUTER:
             return await self._call_computer(args or {}, session_dir)
+        if name in self._x_names:
+            return await self._call_x(name, args or {}, session_dir)
         args = _shrink_screenshot(name, args)
         if self._client is None or not self._client.alive:
             await self._restart()
@@ -277,6 +290,7 @@ class PluginHost:
             self.set_session_dir(self._session_dir)
         await self._start_browser()
         await self._start_computer()
+        await self._start_x()
 
     async def _start_browser(self) -> None:
         if not plugin_enabled("browser-use", default=True):
@@ -368,9 +382,85 @@ class PluginHost:
         self._publish()
         logging.info("[plugins] cua-driver MCP up tools=%s catalog=%s", len(names), catalog)
 
+    def _clear_x(self) -> None:
+        self._x = None
+        self._x_names = set()
+        self._x_schemas = []
+        self._x_tools = {}
+        self._publish()
+
+    async def _start_x(self) -> None:
+        if not plugin_enabled("x", default=True):
+            self._clear_x()
+            return
+        client = None
+        try:
+            if os.environ.get("PERM_WEB") == "1":
+                client = await self._x_http_client()
+            else:
+                client = await self._x_stdio_client()
+            if client is None:
+                self._clear_x()
+                return
+            listed = await client.request("tools/list", {}, timeout=_RPC_TIMEOUT)
+        except Exception:
+            logging.warning("[plugins] x MCP failed to start", exc_info=True)
+            if client is not None:
+                await client.close()
+            self._clear_x()
+            return
+        tools = [item for item in ((listed or {}).get("tools") or []) if isinstance(item, dict)]
+        names = {str(item.get("name") or "") for item in tools if item.get("name")}
+        if not names:
+            logging.warning("[plugins] x MCP listed no tools")
+            await client.close()
+            self._clear_x()
+            return
+        self._x = client
+        self._x_names = names
+        self._x_schemas = [_openai_schema(item) for item in tools]
+        self._x_tools = {name: _PluginTool(name, self) for name in names}
+        self._publish()
+        logging.info("[plugins] x MCP up tools=%s", len(names))
+
+    async def _x_http_client(self) -> Optional[McpHttpClient]:
+        relay = current_relay()
+        if relay is None:
+            logging.warning("[plugins] x skipped: no relay")
+            return None
+        token, api_base = relay
+        suffix = "/perm-llm"
+        url = api_base[: -len(suffix)] + "/perm-x/mcp" if api_base.endswith(suffix) else api_base + "/perm-x/mcp"
+        return McpHttpClient(url, token)
+
+    async def _x_stdio_client(self) -> Optional[McpStdioClient]:
+        client = McpStdioClient([sys.executable, "-m", "agent_loop.plugins.x.server"], env=_plugin_env())
+        await client.start()
+        return client
+
+    async def _call_x(self, name: str, args: Dict[str, Any], session_dir: Optional[str]) -> Any:
+        client = self._x
+        if client is None or not client.alive:
+            await self._start_x()
+            client = self._x
+        if client is None or name not in self._x_names:
+            return f"x plugin is not running ({name})"
+        result = await client.request(
+            "tools/call",
+            {"name": name, "arguments": args},
+            timeout=_RPC_TIMEOUT,
+        )
+        out = _mcp_result_to_output(result, session_dir=session_dir, folder="x")
+        text = out.content if isinstance(out, ToolOutput) else str(out)
+        clipped = _clip_exec_text(text, session_dir, folder="x")
+        if isinstance(out, ToolOutput):
+            out.content = clipped
+            return out, clipped
+        return clipped, clipped
+
     def _publish(self) -> None:
-        self._schemas = list(self._browser_schemas) + list(self._computer_schemas)
-        self._tools = {**self._browser_tools, **self._computer_tools}
+        self._schemas = list(self._browser_schemas) + list(self._computer_schemas) + list(self._x_schemas)
+        self._tools = {**self._browser_tools, **self._computer_tools, **self._x_tools}
 
     async def _restart_computer(self) -> None:
         async with self._start_lock:

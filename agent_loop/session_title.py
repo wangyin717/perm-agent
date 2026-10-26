@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -77,6 +78,28 @@ def write_title(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
     return payload
+
+
+def stamp_updated(
+    workspace: PathLike,
+    session_id: str,
+    home: Optional[PathLike] = None,
+) -> int:
+    """把这一轮的时间写进 title.json。解压家目录会改掉文件修改时间，不能用它排序。"""
+    path = title_path(workspace, session_id, home)
+    data: Dict[str, Any] = {"title": "", "title_is_manual": False}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data.update(loaded)
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+    updated = int(time.time() * 1000)
+    data["updated"] = updated
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+    return updated
 
 
 def display_title(

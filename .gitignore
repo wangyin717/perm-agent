@@ -17,4 +17,7 @@ sample_data.csv
 *.egg-info/
 test_jev/
 
+docker/
+docs/
+game_test/
 tests/

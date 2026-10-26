@@ -7,7 +7,7 @@ dependencies = [
     "aiohttp",
     "pyyaml",
     "ddgs",
-    "textual",
+    "textual>=8.2,<9",
     "pypdf>=6.18.1",
     "python-docx>=1.2.0",
     "openpyxl>=3.1.5",
@@ -26,7 +26,7 @@ build-backend = "setuptools.build_meta"
 include = ["agent_loop*"]
 
 [tool.setuptools.package-data]
-agent_loop = ["prompt/*.yaml", "tools/*.json", "plugins/*/SKILL.md", "plugins/*/plugin.json"]
+agent_loop = ["prompt/*.yaml", "tools/*.json", "plugins/*/SKILL.md", "plugins/*/plugin.json", "bundled_skills/*/SKILL.md"]
 
 [dependency-groups]
 dev = [

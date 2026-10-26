@@ -1,0 +1,5 @@
+{
+  "name": "x",
+  "enabled_by_default": true,
+  "mcp": ["python", "-m", "agent_loop.plugins.x.server"]
+}

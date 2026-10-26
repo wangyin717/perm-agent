@@ -32,7 +32,10 @@ def user_skills_dir(home: Optional[Path] = None) -> Path:
 
 
 def ensure_user_skills(home: Optional[Path] = None) -> Path:
-    """安装和 perm update 时，把代码里的官方技能盖到 ~/.permanent/skills/。启动不调用。"""
+    """把代码里的官方技能盖到家目录的 skills/。
+
+    本机只在安装和 perm update 时调用。网页容器在恢复家目录之后调用。
+    """
     dest_root = user_skills_dir(home)
     dest_root.mkdir(parents=True, exist_ok=True)
     if not _BUNDLED.is_dir():

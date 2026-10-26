@@ -21,6 +21,7 @@ from agent_loop.compaction import ContextUsageTracker, maybe_compact
 from agent_loop.envfile import load_dotenv
 from agent_loop.inbox import UserInbox
 from agent_loop.llm import make_client
+from agent_loop.relay import current_relay
 from agent_loop.llm.client import ChatClient
 from agent_loop.recover import (
     apply_recovery,
@@ -35,7 +36,7 @@ from agent_loop.runtime.tool_concurrency import run_tool_calls, terminate_cutoff
 from agent_loop.runtime.tool_runtime import ToolRuntime, is_user_denied
 from agent_loop.runtime.records import new_result_id
 from agent_loop.cli.trace import log_context, log_llm_text, log_llm_tools, log_user
-from agent_loop.session_title import ensure_auto_title
+from agent_loop.session_title import ensure_auto_title, stamp_updated
 from agent_loop.events import emit as emit_event
 from agent_loop.deps import ExecutionDependencies
 from agent_loop.prompt import build_system_prompt
@@ -51,6 +52,35 @@ def _reasoning_log_fields(response) -> Dict[str, Any]:
     if details:
         return {"reasoning_details": details}
     return {}
+
+
+def model_user_text(query: str, reference: str) -> str:
+    """没有引用时原样给模型。有引用时用标签把两段分开。"""
+    ref = (reference or "").strip()
+    if not ref:
+        return query
+    return "<reference>\n" + ref + "\n</reference>\n\n<user_query>\n" + query + "\n</user_query>"
+
+
+def overlay_reference(messages: list, query: str, reference: str) -> bool:
+    """只改发给模型的最后一句用户话。会话记录里的原文不动。"""
+    shown = model_user_text(query, reference)
+    if shown == query:
+        return False
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if content == query:
+            msg["content"] = shown
+            return True
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text" and block.get("text") == query:
+                    block["text"] = shown
+                    return True
+        return False
+    return False
 
 
 class AgentLoop:
@@ -99,6 +129,8 @@ class ReactAgentLoop(AgentLoop):
         self.inbox = UserInbox()
         self._abort: Optional[Abort] = None
         self._memory_task: Optional[asyncio.Task] = None
+        self._pending_reference = ""
+        self._pending_query = ""
 
     @property
     def hooks(self):
@@ -112,10 +144,17 @@ class ReactAgentLoop(AgentLoop):
     def tool_result_records(self):
         return self.runtime.tool_result_records
 
+    def _make_llm(self, model_id: Optional[str] = None) -> ChatClient:
+        relay = current_relay()
+        if relay is not None:
+            token, api_base = relay
+            return make_client(model_id, api_key=token, api_base=api_base)
+        load_dotenv()
+        return make_client(model_id)
+
     def _get_llm(self) -> ChatClient:
         if self._llm is None:
-            load_dotenv()
-            self._llm = make_client()
+            self._llm = self._make_llm()
         return self._llm
 
     def set_model(self, model_id: str) -> str:
@@ -123,19 +162,15 @@ class ReactAgentLoop(AgentLoop):
 
         model_id = save_model(model_id)
         if self._llm is not None:
-            load_dotenv()
-            self._llm = make_client(model_id)
+            self._llm = self._make_llm(model_id)
         return model_id
 
     def _seed_title(self, user_action_data: Dict[str, Any], hint: str = "") -> None:
         workspace = str(user_action_data.get("workspace") or os.getcwd())
         session_id = str(user_action_data.get("sessionId") or "default")
-        ensure_auto_title(
-            workspace,
-            session_id,
-            hint,
-            user_action_data.get("sparkHome"),
-        )
+        home = user_action_data.get("sparkHome")
+        ensure_auto_title(workspace, session_id, hint, home)
+        stamp_updated(workspace, session_id, home)
 
     def _cancel_memory(self) -> None:
         task = self._memory_task
@@ -172,6 +207,7 @@ class ReactAgentLoop(AgentLoop):
         user_action_data: Dict[str, Any],
         *,
         wait_for_memory: bool = True,
+        reference: str = "",
     ) -> str:
         self._cancel_memory()
         self._log = SessionLog(session_log_path(user_action_data))
@@ -212,6 +248,11 @@ class ReactAgentLoop(AgentLoop):
                 supports_images=getattr(llm, "supports_images", False),
             )
         )
+        # 引用只出现在发给模型的这一句里。会话记录和标题仍是用户原话。
+        self._pending_reference = (reference or "").strip()
+        self._pending_query = user_query
+        if overlay_reference(messages, user_query, self._pending_reference):
+            self._pending_reference = ""
         tracker = ContextUsageTracker(context_window=getattr(llm, "context_window", 0) or 0)
         # bootstrap 是本地估算，不发请求；第一次真实 llm.call 拿到 usage 后会被校准掉。
         tracker.bootstrap(messages)
@@ -399,12 +440,16 @@ class ReactAgentLoop(AgentLoop):
         llm = self._get_llm()
         for text, media in self.inbox.drain_steer():
             self._append_user(text, media or None)
-            row = {"content": text, "media": media or []}
+            shown = text
+            if self._pending_reference and text == self._pending_query:
+                shown = model_user_text(text, self._pending_reference)
+                self._pending_reference = ""
+            row = {"content": shown, "media": media or []}
             msg = user_api_message(
                 row, supports_images=getattr(llm, "supports_images", False)
             )
             messages.append(msg)
-            tracker.add_estimate({"role": "user", "content": text})
+            tracker.add_estimate({"role": "user", "content": shown})
             log_user(text)
 
     def _tool_schemas(self) -> list:

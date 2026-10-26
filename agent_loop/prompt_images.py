@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -158,6 +159,33 @@ def persist_image_bytes(data: bytes, mime: str, session_dir: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
     return dest.resolve()
+
+
+def media_from_b64_items(items: object, session_dir: Path, limit: int = 4) -> List[Dict]:
+    """网页贴来的 base64 图片落到会话目录，给模型的是文件路径。"""
+    if not isinstance(items, list):
+        return []
+    media: List[Dict] = []
+    for item in items[:limit]:
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("data")
+        if not isinstance(raw, str) or len(raw) < 16:
+            continue
+        try:
+            data = base64.b64decode(raw, validate=False)
+        except (ValueError, TypeError):
+            continue
+        sniffed = sniff_image(data)
+        if sniffed is None:
+            continue
+        mime, _ext = sniffed
+        try:
+            path = persist_image_bytes(data, mime, session_dir)
+        except (ValueError, OSError):
+            continue
+        media.append({"kind": "image", "mime": mime, "path": str(path)})
+    return media
 
 
 def persist_image_file(src: Path, session_dir: Path) -> Tuple[Path, str]:

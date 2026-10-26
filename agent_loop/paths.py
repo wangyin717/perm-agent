@@ -97,6 +97,7 @@ def list_sessions(workspace: PathLike, home: Optional[PathLike] = None) -> List[
         preview = _first_user_preview(log)
         title = ""
         manual = False
+        updated = 0
         meta_path = child / "title.json"
         if meta_path.is_file():
             try:
@@ -104,19 +105,26 @@ def list_sessions(workspace: PathLike, home: Optional[PathLike] = None) -> List[
                 if isinstance(meta, dict):
                     title = str(meta.get("title") or "").strip()
                     manual = bool(meta.get("title_is_manual"))
+                    try:
+                        updated = int(meta.get("updated") or 0)
+                    except (TypeError, ValueError):
+                        updated = 0
             except (OSError, json.JSONDecodeError, TypeError):
                 pass
+        if updated <= 0:
+            updated = int(mtime * 1000)
         items.append(
             {
                 "id": child.name,
                 "mtime": mtime,
+                "updated": updated,
                 "preview": preview,
                 "title": title or preview or child.name,
                 "title_is_manual": manual,
                 "path": log,
             }
         )
-    items.sort(key=lambda row: float(row["mtime"]), reverse=True)
+    items.sort(key=lambda row: int(row.get("updated") or 0), reverse=True)
     return items
 
 

@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import sys
+import urllib.request
 from typing import Any, Dict, List, Optional
 
 from agent_loop.abort import RetryCancelledError, current_abort
@@ -187,7 +188,9 @@ async def search_perplexity(
     timeout = aiohttp.ClientTimeout(total=PERPLEXITY_TIMEOUT_SEC)
 
     async def _post() -> Any:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        # aiohttp 3.14 默认不读系统代理。这台机器直连 api.perplexity.ai 会挂到超时，
+        # 浏览器和 Magpie 走的是系统代理 127.0.0.1:7897。
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.post(url, json=payload, headers=headers) as resp:
                 body = await resp.text()
                 if resp.status >= 400:
@@ -262,9 +265,18 @@ async def search_ddgs(query: str, max_results: int) -> List[Dict[str, str]]:
     return _parse_ddgs_envelope(out or "")
 
 
+def _system_proxy() -> str:
+    proxies = urllib.request.getproxies()
+    return str(proxies.get("https") or proxies.get("http") or "")
+
+
 def _start_ddgs_proc() -> subprocess.Popen:
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join([p for p in sys.path if p])
+    if not env.get("DDGS_PROXY"):
+        proxy = _system_proxy()
+        if proxy:
+            env["DDGS_PROXY"] = proxy
     extra: Dict[str, Any] = (
         {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
         if sys.platform == "win32"

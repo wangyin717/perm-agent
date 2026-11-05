@@ -283,7 +283,7 @@ async def http_get(url: str) -> FetchResponse:
         "Accept": "text/markdown, text/plain;q=0.9, text/html;q=0.8, */*;q=0.1",
         "Accept-Language": "en-US,en;q=0.8",
     }
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
         async with session.get(url, allow_redirects=False, headers=headers) as resp:
             header_map = {k: v for k, v in resp.headers.items()}
             chunks: List[bytes] = []

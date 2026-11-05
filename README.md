@@ -76,4 +76,4 @@ Type `/` in the input box. `/` alone lists the commands. Tab completes one.
 - `/help`: list these commands.
 - `/exit`: quit. `/quit` does the same.
 
-Enter sends. Esc aborts the current turn. Ctrl+Q quits.
+Enter sends. Ctrl+C or Esc aborts the current turn. Command+C copies. Ctrl+Q quits.

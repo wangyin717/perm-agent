@@ -11,6 +11,8 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional
 
+from agent_loop.abort import RetryCancelledError, current_abort
+
 import aiohttp
 
 from agent_loop.relay import current_relay
@@ -120,6 +122,8 @@ async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_di
         try:
             hits = await search_perplexity(query, max_results, token, url)
             return format_results(hits, query, backend="perplexity")
+        except RetryCancelledError:
+            raise RuntimeError("aborted")
         except PerplexitySearchError as exc:
             if not exc.should_fallback():
                 raise
@@ -131,6 +135,8 @@ async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_di
         try:
             hits = await search_perplexity(query, max_results, key)
             return format_results(hits, query, backend="perplexity")
+        except RetryCancelledError:
+            raise RuntimeError("aborted")
         except PerplexitySearchError as exc:
             if not exc.should_fallback():
                 raise
@@ -179,7 +185,8 @@ async def search_perplexity(
         "Content-Type": "application/json",
     }
     timeout = aiohttp.ClientTimeout(total=PERPLEXITY_TIMEOUT_SEC)
-    try:
+
+    async def _post() -> Any:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=payload, headers=headers) as resp:
                 body = await resp.text()
@@ -189,21 +196,73 @@ async def search_perplexity(
                         status=resp.status,
                     )
                 try:
-                    data = json.loads(body)
+                    return json.loads(body)
                 except json.JSONDecodeError as exc:
                     raise PerplexitySearchError("Search API returned non-JSON") from exc
+
+    work = asyncio.create_task(_post())
+    try:
+        data = await _until_abort(work)
+    except RetryCancelledError:
+        raise
     except PerplexitySearchError:
         raise
     except Exception as exc:
         raise PerplexitySearchError(str(exc) or type(exc).__name__) from exc
+    finally:
+        if not work.done():
+            work.cancel()
     return _hits_from_perplexity(data)
 
 
+async def _until_abort(work: "asyncio.Future[Any]") -> Any:
+    """用户按了停止时，不再等这次请求自己超时。"""
+    abort = current_abort()
+    if abort is None:
+        return await work
+    if abort.aborted:
+        work.cancel()
+        raise RetryCancelledError()
+    stopper = asyncio.create_task(abort.wait())
+    try:
+        done, _pending = await asyncio.wait(
+            {work, stopper}, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        if not stopper.done():
+            stopper.cancel()
+    if work not in done:
+        work.cancel()
+        raise RetryCancelledError()
+    return work.result()
+
+
 async def search_ddgs(query: str, max_results: int) -> List[Dict[str, str]]:
-    return await asyncio.to_thread(_search_ddgs_bounded, query, max_results)
+    proc = _start_ddgs_proc()
+    payload = json.dumps({"query": query, "max_results": max_results})
+    loop = asyncio.get_running_loop()
+    work = asyncio.wrap_future(
+        loop.run_in_executor(
+            None, lambda: proc.communicate(payload, timeout=DDGS_TIMEOUT_SEC)
+        )
+    )
+    try:
+        try:
+            out, err = await _until_abort(work)
+        except RetryCancelledError:
+            raise RuntimeError("aborted")
+        except subprocess.TimeoutExpired:
+            raise TimeoutError(f"DuckDuckGo search timed out after {DDGS_TIMEOUT_SEC}s")
+    finally:
+        if proc.poll() is None:
+            _terminate_and_reap(proc)
+    if proc.returncode not in (0, None) and not (out or "").strip():
+        detail = (err or "").strip()[:200]
+        raise RuntimeError(detail or f"DuckDuckGo worker exited {proc.returncode}")
+    return _parse_ddgs_envelope(out or "")
 
 
-def _search_ddgs_bounded(query: str, max_results: int) -> List[Dict[str, str]]:
+def _start_ddgs_proc() -> subprocess.Popen:
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join([p for p in sys.path if p])
     extra: Dict[str, Any] = (
@@ -211,7 +270,7 @@ def _search_ddgs_bounded(query: str, max_results: int) -> List[Dict[str, str]]:
         if sys.platform == "win32"
         else {"start_new_session": True}
     )
-    proc = subprocess.Popen(
+    return subprocess.Popen(
         [sys.executable, "-m", "agent_loop.tools.web_search_ddgs_worker"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -222,16 +281,6 @@ def _search_ddgs_bounded(query: str, max_results: int) -> List[Dict[str, str]]:
         errors="replace",
         **extra,
     )
-    payload = json.dumps({"query": query, "max_results": max_results})
-    try:
-        out, err = proc.communicate(payload, timeout=DDGS_TIMEOUT_SEC)
-    except subprocess.TimeoutExpired:
-        _terminate_and_reap(proc)
-        raise TimeoutError(f"DuckDuckGo search timed out after {DDGS_TIMEOUT_SEC}s")
-    if proc.returncode not in (0, None) and not (out or "").strip():
-        detail = (err or "").strip()[:200]
-        raise RuntimeError(detail or f"DuckDuckGo worker exited {proc.returncode}")
-    return _parse_ddgs_envelope(out or "")
 
 
 def _terminate_and_reap(proc: subprocess.Popen) -> None:

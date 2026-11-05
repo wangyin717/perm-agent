@@ -71,10 +71,10 @@ HELP_COMMANDS = (
     ("/rename", "set session title (/rename --auto uses first prompt)"),
     ("/session", "show session id and log path"),
 )
-HELP_KEYS = "Enter send    Esc abort    Ctrl+Q quit"
+HELP_KEYS = "Enter send    Ctrl+C abort    Ctrl+Q quit"
 
 
-_IDLE = "idle  /help  Enter send  Esc abort  Ctrl+Q quit"
+_IDLE = "idle  /help  Enter send  Ctrl+C abort  Ctrl+Q quit"
 _ARG_MAX = 64
 _STEP_TOOLS_MAX = 3
 _RESUME_PAGE = 10
@@ -1603,7 +1603,8 @@ class PromptInput(Input):
         Binding("tab", "slash_tab", show=False),
         Binding("up", "slash_up", show=False),
         Binding("down", "slash_down", show=False),
-        Binding("ctrl+c,super+c", "copy", show=False),
+        Binding("ctrl+c", "stop_task", show=False),
+        Binding("super+c", "copy", show=False),
         Binding("escape", "abort_key", show=False),
     ]
     DEFAULT_CSS = """
@@ -1665,13 +1666,12 @@ class PromptInput(Input):
         if callable(abort):
             abort()
 
+    def action_stop_task(self) -> None:
+        abort = getattr(self.app, "action_abort_turn", None)
+        if callable(abort):
+            abort()
+
     def action_copy(self) -> None:
-        app = self.app
-        if getattr(app, "_busy", False) and not (self.selected_text or "").strip():
-            abort = getattr(app, "action_abort_turn", None)
-            if callable(abort):
-                abort()
-            return
         selected = self.selected_text
         if selected:
             self.app.copy_to_clipboard(selected)
@@ -2562,7 +2562,8 @@ class SparkTui(App):
     """
     BINDINGS = [
         Binding("shift+tab", "toggle_approval_mode", show=False),
-        Binding("ctrl+c", "copy_selection", "Copy", show=False),
+        Binding("ctrl+c", "abort_turn", "Abort", show=False),
+        Binding("super+c", "copy_selection", "Copy", show=False),
         Binding("ctrl+q", "quit", "Quit"),
         Binding("escape", "abort_turn", "Abort"),
         Binding("pageup", "page_up", "Scroll up", show=False),
@@ -4457,6 +4458,8 @@ class SparkTui(App):
         if future is not None and not future.done():
             future.set_result("deny")
         abort = getattr(self.loop, "_abort", None)
+        if not self._busy and abort is None:
+            return
         if abort is not None:
             abort.abort()
         plugins = getattr(self, "plugins", None)
@@ -4465,6 +4468,7 @@ class SparkTui(App):
             cancel()
         self._aborting = True
         self._clear_activity()
+        self._end_running_tool()
         self._end_think()
         try:
             self.workers.cancel_group("turn")

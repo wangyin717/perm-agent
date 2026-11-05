@@ -16,7 +16,7 @@ import signal
 
 from typing import Any, Dict, Optional
 
-from agent_loop.abort import Abort
+from agent_loop.abort import Abort, bind_abort, reset_abort
 from agent_loop.compaction import ContextUsageTracker, maybe_compact
 from agent_loop.envfile import load_dotenv
 from agent_loop.inbox import UserInbox
@@ -276,6 +276,7 @@ class ReactAgentLoop(AgentLoop):
             _listen_sigint(abort) if user_action_data.get("install_sigint", True) else (lambda: None)
         )
         session_id = str(user_action_data.get("sessionId") or "default")
+        abort_token = bind_abort(abort)
         try:
             result = await self._run_outer_inner(
                 messages, llm, abort, tracker, system_content=system
@@ -290,6 +291,7 @@ class ReactAgentLoop(AgentLoop):
                     self._memory_task = asyncio.create_task(remember)
             return result
         finally:
+            reset_abort(abort_token)
             stop_listening()
             if host is not None and hasattr(host, "bind_abort"):
                 host.bind_abort(None)
@@ -371,6 +373,14 @@ class ReactAgentLoop(AgentLoop):
                         tracker,
                         supports_images=getattr(llm, "supports_images", False),
                     )
+                    if abort.aborted:
+                        note = "Stopped."
+                        messages.append({"role": "assistant", "content": note})
+                        self._log.append_entry("assistant", id=new_result_id(), content=note)
+                        log_llm_text(note)
+                        final_text = note
+                        has_more_tools = False
+                        continue
                     if denied:
                         # 拒绝只停这一轮。补一条 assistant，避免下次启动把停在 tool_result
                         # 的日志当成还没说完、自动再叫模型。

@@ -66,6 +66,16 @@ tool_notes:
     for Allow, that happens inside browser_exec — do not start Chrome.
     Desktop apps use the computer tool, not bash. Web pages stay on
     browser_exec.
+  web_search: |
+    Look things up with web_search, then answer from the snippets.
+    If the snippets are thin, search again with different keywords.
+    Do not web_fetch the result list. In one user request, open at most
+    one page, and only when a snippet is missing a fact the answer needs.
+    A market check is a few searches, not one fetch per ticker.
+  web_fetch: |
+    web_fetch opens one page. Use it for a link the user pasted, or for
+    the single search result whose snippet is not enough. Do not walk a
+    list of related pages.
   memory_search: |
     For facts or preferences from earlier sessions, use memory_search
     (not grep on the repo). Recalled memory is historical — verify against

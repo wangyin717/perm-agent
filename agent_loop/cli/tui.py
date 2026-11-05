@@ -2820,23 +2820,24 @@ class SparkTui(App):
         self._painted_at = time.monotonic()
 
     def _hold_refresh_for_ime(self) -> bool:
-        """光标在拼音中间时先别重画。重画结束会把光标拉回这串字的最左边。
+        """只有输入法正在组字时才暂停重画。没打拼音就按正常节奏刷新。
 
-        刚画完要歇一下再问光标。问的时候如果马上又画，终端报回来的还是刚被拉回去的位置。
+        组字时刚画完要歇一下再问光标。问完马上又画，终端报回来的还是刚被拉回去的位置，
+        会把正在输入的拼音误判成已经结束。
         """
         if self.is_headless or self._driver is None:
             return self._ime_ahead
-        now = time.monotonic()
         self._probe_ime_cursor()
-        if self._ime_ahead:
-            return True
+        if not self._ime_ahead:
+            return False
+        now = time.monotonic()
         if self._painted_at and now - self._painted_at < 0.25:
             return True
         if self._cursor_report_at <= self._painted_at:
             if self._cursor_asked and now - self._cursor_asked > 0.4:
                 return False
             return True
-        return False
+        return True
 
     def on_cursor_position(self, event: CursorPosition) -> None:
         anchor = self.cursor_position

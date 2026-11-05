@@ -233,15 +233,15 @@ def _prose_rich_theme() -> Theme:
         "markdown.h4": Style(bold=True, color=colors.h4),
         "markdown.h5": Style(bold=True, color=colors.h5),
         "markdown.h6": Style(color=colors.h6),
-        "markdown.strong": Style(bold=True, color=colors.secondary),
+        "markdown.strong": Style(bold=True, color=colors.text),
         "markdown.code": Style(bold=True, color=colors.code),
         "markdown.code_block": Style(color=colors.code),
         "markdown.link": Style(color=colors.blue, underline=True),
         "markdown.link_url": Style(color=colors.blue, underline=True),
-        "markdown.paragraph": Style(color=colors.secondary),
-        "markdown.em": Style(italic=True, color=colors.secondary),
-        "markdown.list": Style(color=colors.secondary),
-        "markdown.item.number": Style(color=colors.secondary),
+        "markdown.paragraph": Style(color=colors.text),
+        "markdown.em": Style(italic=True, color=colors.text),
+        "markdown.list": Style(color=colors.text),
+        "markdown.item.number": Style(color=colors.muted),
         "markdown.block_quote": Style(color=colors.muted),
         "markdown.hr": Style(color=colors.muted),
         "markdown.table.border": Style(color=colors.muted),
@@ -349,12 +349,12 @@ def _markdown_as_text(src: str, width: int) -> Text:
 
 
 def _bold_verb(text: str) -> str:
-    """工具名加粗，入参灰色且截断。"""
+    """工具名用正文色，参数更淡，避免整行都是粗体。"""
     parts = text.split(None, 1)
     if len(parts) == 2:
         arg = markup_escape(_clip_arg(parts[1]))
-        return f"[bold]{parts[0]}[/] [$muted]{arg}[/]"
-    return f"[bold]{text}[/]"
+        return f"[$text]{parts[0]}[/] [$faint]{arg}[/]"
+    return f"[$text]{text}[/]"
 
 
 def _chrome_label(workspace: str) -> str:
@@ -436,11 +436,11 @@ def apple_terminal_newline_modifier_held() -> bool:
 
 def _thinking_line(dt: float, *, hollow: bool = False) -> str:
     mark = "[$mark-rest]◇[/]" if hollow else "[$muted]◆[/]"
-    return f"{mark} [bold]Thinking[/][$muted]… {format_wait(dt)}[/]"
+    return f"{mark} [$muted]Thinking… {format_wait(dt)}[/]"
 
 
 def _thought_line(dt: float) -> str:
-    return _mark(f"[bold]Thought[/] [$muted]for {format_wait(dt)}[/]")
+    return _mark(f"[$muted]Thought for {format_wait(dt)}[/]")
 
 
 _THOUGHT_MAX_CHARS = 480
@@ -780,9 +780,9 @@ class UserBanner(Static):
     UserBanner {
         background: $banner;
         color: $text;
-        padding: 1 2;
+        padding: 0 2;
         width: 100%;
-        margin-bottom: 1;
+        margin: 1 0 0 0;
     }
     """
 
@@ -1031,7 +1031,7 @@ class TimelineRow(Static):
         padding: 0 2;
         color: $secondary;
     }
-    TimelineRow.thought { color: $secondary; }
+    TimelineRow.thought { color: $muted; }
     TimelineRow.tool { color: $secondary; }
     TimelineRow.edit { color: $secondary; }
     TimelineRow.muted {
@@ -1164,7 +1164,7 @@ class RunningToolRow(Horizontal):
     RunningToolRow .run-text {
         width: 1fr;
         height: 1;
-        color: $secondary;
+        color: $muted;
         background: $page;
     }
     """
@@ -1242,9 +1242,10 @@ class ThoughtBody(Static):
     ThoughtBody {
         height: auto;
         width: 1fr;
-        margin: 0 2 1 2;
+        margin: 0 3 1 4;
         padding: 0;
-        color: $secondary;
+        color: $muted;
+        text-style: italic;
         background: $page;
         pointer: text;
     }
@@ -1255,13 +1256,13 @@ class ThoughtBody(Static):
 
         self._src = text or ""
         shown = _clip_thought(self._src)
-        super().__init__(Text(shown, style=palette().secondary), shrink=True, markup=False)
+        super().__init__(Text(shown, style=f"italic {palette().muted}"), shrink=True, markup=False)
 
     def set_text(self, text: str) -> None:
         from agent_loop.cli.theme import palette
 
         self._src = text or ""
-        self.update(Text(_clip_thought(self._src), style=palette().secondary))
+        self.update(Text(_clip_thought(self._src), style=f"italic {palette().muted}"))
 
     def get_selection(self, selection: Selection) -> Optional[Tuple[str, str]]:
         visual = self._render()
@@ -1538,9 +1539,9 @@ class Prose(Static):
     Prose {
         height: auto;
         width: 1fr;
-        margin: 1 2 1 2;
+        margin: 1 3 1 3;
         background: $page;
-        color: $secondary;
+        color: $text;
     }
     """
 
@@ -2381,12 +2382,15 @@ class SparkTui(App):
     }
     #timeline ThoughtBody {
         height: auto;
-        margin: 0 2 1 2;
+        margin: 0 3 1 4;
+        color: $muted;
+        text-style: italic;
     }
     #timeline Prose {
         height: auto;
-        margin: 1 2;
+        margin: 1 3 1 3;
         padding: 0;
+        color: $text;
         background: $page;
     }
     #timeline DiffBlock {

@@ -158,6 +158,7 @@ class ChatClient:
         if owner.PROVIDER_ID != self.provider_id:
             raise RuntimeError(f"{chosen} belongs to {owner.PROVIDER_ID}")
         self.model = chosen
+        self.upstream_model = ""
         self.api_key = (api_key or _env_key(owner)).strip()
         if not self.api_key:
             raise RuntimeError(f"{owner.ENV_NAME} is not set (put it in ~/.permanent/.env)")
@@ -210,7 +211,7 @@ class ChatClient:
         **kwargs,
     ) -> LLMResponse:
         payload: Dict[str, Any] = {
-            "model": self.model,
+            "model": self.upstream_model or self.model,
             "messages": self._outbound_messages(messages),
             "stream": True,
         }
@@ -284,6 +285,8 @@ class ChatClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        if self.upstream_model:
+            headers["User-Agent"] = "Perm"
         # total 要盖住「等第一块 + 之后的 10 分钟」，否则 aiohttp 仍会在 120 秒掐掉。
         # sock_read 先按等第一块来；读到第一块后会关掉，改由下面的截止时间收口。
         timeout = aiohttp.ClientTimeout(

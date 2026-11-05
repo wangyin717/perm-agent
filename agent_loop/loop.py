@@ -150,7 +150,11 @@ class ReactAgentLoop(AgentLoop):
             token, api_base = relay
             return make_client(model_id, api_key=token, api_base=api_base)
         load_dotenv()
-        return make_client(model_id)
+        client = make_client(model_id)
+        from agent_loop.llm.gateway import apply_magpie
+
+        apply_magpie(client)
+        return client
 
     def _get_llm(self) -> ChatClient:
         if self._llm is None:

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import subprocess
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -71,11 +71,38 @@ NAME = "bash"
 REPLAY = "safe"
 READ_ONLY = False
 
+def after_tool_offload(event: Dict[str, Any]):
+    """命令已经跑完。全文还在 content 里，这里再决定要不要写文件。
+
+    不超过 2000 行、也不超过 50KB，原样留下。超过了，全文写到这次聊天文件夹的
+    tools_result/bash/，模型只看前 200 行和后 1800 行。没有聊天文件夹就不写文件。
+    """
+    content = event.get("content") or ""
+    if not content:
+        return None
+    lines = content.splitlines()
+    n_bytes = len(content.encode("utf-8"))
+    if len(lines) <= MAX_LINES and n_bytes <= MAX_BYTES:
+        return None
+    session_dir = event.get("session_dir")
+    saved = ""
+    if session_dir:
+        saved = _write_output(
+            session_dir,
+            event.get("workspace"),
+            content,
+            event.get("result_id"),
+        )
+    preview = _head_tail(lines)
+    footer = _footer(saved, n_bytes, len(lines), bool(session_dir))
+    return {"content": preview + footer}
+
+
 BEFORE_HOOKS = [
     before_tool_deny_rm,
     before_tool_deny_gui,
 ]
-AFTER_HOOKS: list = []
+AFTER_HOOKS = [after_tool_offload]
 
 MAX_LINES = 2000
 MAX_BYTES = 50 * 1024
@@ -87,7 +114,7 @@ _TIMEOUT_SLACK = 5
 
 async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_dir=None) -> str:
     cmd = args.get("cmd") or args.get("command") or ""
-    return await run_bash(cmd, sandbox, session_dir=session_dir, workspace=workspace)
+    return await run_bash(cmd, sandbox)
 
 
 def _bash_env() -> dict:
@@ -129,44 +156,21 @@ def _local_run(cmd: str, timeout: float = 120):
     )
 
 
-async def run_bash(
-    cmd: str,
-    sandbox=None,
-    timeout: float = 120,
-    session_dir: Optional[str] = None,
-    workspace: Optional[str] = None,
-) -> str:
-    """失败必须 throw。默认本机 bash；测试可传入带 commands.run 的 sandbox。"""
+async def run_bash(cmd: str, sandbox=None, timeout: float = 120) -> str:
+    """失败必须 throw，抛出的是完整输出。写文件和头尾预览在 after_tool。"""
     cmd = (cmd or "").strip()
     if not cmd:
         raise ValueError("cmd 为空")
     result = await _run_once(sandbox, cmd, timeout)
     output = ((result.stdout or "") + (result.stderr or "")).strip()
-    shown = _preview_and_spill(output, session_dir, workspace) if output else ""
     if getattr(result, "timed_out", False):
         note = f"Command timed out after {timeout} seconds"
-        raise RuntimeError(f"{shown}\n\n{note}" if shown else note)
+        raise RuntimeError(f"{output}\n\n{note}" if output else note)
     if not output and not result.exit_code:
         return f"命令执行完毕（退出码 {result.exit_code}）"
     if result.exit_code:
-        raise RuntimeError(shown or f"Command exited with code {result.exit_code}")
-    return shown
-
-
-def _preview_and_spill(
-    full: str, session_dir: Optional[str], workspace: Optional[str]
-) -> str:
-    lines = full.splitlines()
-    n_lines = len(lines)
-    n_bytes = len(full.encode("utf-8"))
-    if n_lines <= MAX_LINES and n_bytes <= MAX_BYTES:
-        return full
-    saved = ""
-    if session_dir:
-        saved = _write_output(session_dir, workspace, full)
-    preview = _head_tail(lines)
-    footer = _footer(saved, n_bytes, n_lines, bool(session_dir))
-    return preview + footer
+        raise RuntimeError(output or f"Command exited with code {result.exit_code}")
+    return output
 
 
 def _head_tail(lines: List[str]) -> str:
@@ -217,9 +221,17 @@ def _footer(saved: str, n_bytes: int, n_lines: int, had_session: bool) -> str:
     )
 
 
-def _write_output(session_dir: str, workspace: Optional[str], full: str) -> str:
-    short_id = uuid.uuid4().hex[:12]
-    dest = Path(session_dir) / "workspace" / "tools_result" / "bash" / f"{short_id}.txt"
+def _file_id(result_id: Optional[str], full: str) -> str:
+    raw = "".join(ch for ch in str(result_id or "") if ch.isalnum() or ch in "-_")
+    if raw:
+        return raw[:64]
+    return hashlib.sha256(full.encode("utf-8")).hexdigest()[:12]
+
+
+def _write_output(
+    session_dir: str, workspace: Optional[str], full: str, result_id: Optional[str]
+) -> str:
+    dest = Path(session_dir) / "workspace" / "tools_result" / "bash" / f"{_file_id(result_id, full)}.txt"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(full, encoding="utf-8")
     root = Path(workspace or ".").resolve()

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from agent_loop.runtime.tool_runtime import ToolRuntime
-from agent_loop.runtime.records import ToolResultEntry, create_error_tool_result
+from agent_loop.runtime.records import ToolOutput, ToolResultEntry, create_error_tool_result
 from agent_loop.tools.read_tool import IMAGE_OMIT_NOTE, encode_image_data_url
 from agent_loop.tools.registry import get_tool
 
@@ -443,12 +443,13 @@ async def _replay_one(runtime: ToolRuntime, item: UnfinishedTool, sandbox=None) 
         return
     logging.info("[recover] replay tool=%s result_id=%s", item.tool_name, item.result_id)
     try:
-        content = await tool.execute(
+        raw = await tool.execute(
             item.effective_args,
             sandbox,
             workspace=getattr(runtime, "workspace", None),
             session_dir=getattr(runtime, "session_dir", None),
         )
+        content = raw.content if isinstance(raw, ToolOutput) else raw
         is_error = False
     except Exception as exc:
         logging.exception("[recover] replay execute 失败 tool=%s", item.tool_name)
@@ -461,6 +462,9 @@ async def _replay_one(runtime: ToolRuntime, item: UnfinishedTool, sandbox=None) 
             item.effective_args,
             content,
             is_error=is_error,
+            session_dir=getattr(runtime, "session_dir", None),
+            workspace=getattr(runtime, "workspace", None),
+            result_id=item.result_id,
         )
     except Exception as exc:
         logging.exception("[recover] replay after_tool 失败 tool=%s", item.tool_name)

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
-import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -45,8 +45,59 @@ def before_tool_deny_empty_pattern(event: Dict[str, Any]):
     return None
 
 
+_ENVELOPE = "perm-grep-v1\n"
+
+
+def after_tool_offload(event: Dict[str, Any]):
+    """搜索已经结束。超过一页的完整命中还包在 content 里。
+
+    有这次聊天的文件夹时，全部命中写到 tools_result/grep/，模型只看前 20 条，
+    页脚带 cursor。没有文件夹就只给第一页，不写文件，也不给 cursor。
+    已经是一页结果的（含用 cursor 翻出来的下一页）不再处理。
+    """
+    content = event.get("content") or ""
+    if not content.startswith(_ENVELOPE):
+        return None
+    try:
+        payload = json.loads(content[len(_ENVELOPE):])
+    except json.JSONDecodeError:
+        return None
+    hits = list(payload.get("hits") or [])
+    meta = payload.get("meta") or {}
+    session_dir = event.get("session_dir")
+    short_id = None
+    if session_dir and hits:
+        short_id = _file_id(event.get("result_id"), content)
+        _write_snapshot(
+            session_dir,
+            short_id,
+            str(meta.get("pattern") or ""),
+            str(meta.get("path") or ""),
+            meta.get("glob"),
+            str(meta.get("display") or "."),
+            hits,
+            bool(meta.get("count_capped")),
+        )
+    page = _format_page(
+        hits,
+        offset=0,
+        short_id=short_id,
+        pattern=str(meta.get("pattern") or ""),
+        display=str(meta.get("display") or "."),
+        count_capped=bool(meta.get("count_capped")),
+    )
+    return {"content": page}
+
+
+def _file_id(result_id: Optional[str], content: str) -> str:
+    hex_chars = "".join(ch for ch in str(result_id or "").lower() if ch in "0123456789abcdef")
+    if len(hex_chars) >= 12:
+        return hex_chars[:12]
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+
+
 BEFORE_HOOKS = [before_tool_deny_empty_pattern]
-AFTER_HOOKS: list = []
+AFTER_HOOKS = [after_tool_offload]
 
 
 def which_rg() -> Optional[str]:
@@ -78,17 +129,27 @@ async def execute(
 
     display = path or "."
     hits, count_capped = await _run_search(pattern, target, glob, Path(root).resolve())
-    short_id = None
-    if session_dir and hits:
-        short_id = uuid.uuid4().hex[:12]
-        _write_snapshot(session_dir, short_id, pattern, path, glob, display, hits, count_capped)
-    return _format_page(
-        hits,
-        offset=0,
-        short_id=short_id,
-        pattern=pattern,
-        display=display,
-        count_capped=count_capped,
+    if len(hits) <= PAGE_SIZE and not count_capped:
+        return _format_page(
+            hits,
+            offset=0,
+            short_id=None,
+            pattern=pattern,
+            display=display,
+            count_capped=False,
+        )
+    return _ENVELOPE + json.dumps(
+        {
+            "meta": {
+                "pattern": pattern,
+                "path": path,
+                "glob": glob,
+                "display": display,
+                "count_capped": count_capped,
+            },
+            "hits": hits,
+        },
+        ensure_ascii=False,
     )
 
 

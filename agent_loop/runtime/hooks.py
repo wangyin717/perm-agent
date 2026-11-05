@@ -15,7 +15,7 @@ from __future__ import annotations
 import inspect
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from agent_loop.tools.registry import TOOLS
 
@@ -106,6 +106,9 @@ class Hooks:
         args: Dict[str, Any],
         content: str,
         is_error: bool = False,
+        session_dir: Optional[str] = None,
+        workspace: Optional[str] = None,
+        result_id: Optional[str] = None,
     ) -> AfterToolDecision:
         current_content = content if content is not None else ""
         current_is_error = bool(is_error)
@@ -114,6 +117,8 @@ class Hooks:
 
         # 同样是链式：content/is_error 会被逐个 handler 累积改写；terminate 一旦被
         # 某个 handler 置为 True 就不会再被后面的 handler 清掉（这里没有 elif None 分支）。
+        # session_dir 是这次聊天的文件夹。长结果在这里写到它下面，再换成短预览。
+        # result_id 是执行前就定下的编号，文件名用它，重放时写回同一个文件。
         for handler in handlers:
             event = {
                 "tool_call_id": tool_call_id,
@@ -121,6 +126,9 @@ class Hooks:
                 "args": dict(args or {}),
                 "content": current_content,
                 "is_error": current_is_error,
+                "session_dir": session_dir,
+                "workspace": workspace,
+                "result_id": result_id,
             }
             result = handler(event)
             if inspect.isawaitable(result):

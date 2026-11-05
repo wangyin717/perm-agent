@@ -52,10 +52,37 @@ def after_tool_truncate_output(event: Dict[str, Any]):
     return {"content": content[:limit] + "\n...[output truncated]"}
 
 
+def after_tool_offload_extract(event: Dict[str, Any]):
+    """docx / xlsx 已经抽成全文。普通文本和图片不走这里。
+
+    抽出的文字不超过 8000 字，原样留下。超过了，有这次聊天的文件夹就写到
+    tools_result/read/，模型只看大约 30 行。没有文件夹就按行分页，页脚给出下一页行号。
+    """
+    if event.get("is_error"):
+        return None
+    content = event.get("content") or ""
+    if not (content.startswith("[docx] ") or content.startswith("[xlsx] ")):
+        return None
+    if len(content) <= SPILL_CHARS:
+        return None
+    session_dir = event.get("session_dir")
+    if not session_dir:
+        return {"content": _paginate(content)}
+    first = content.split("\n", 1)[0]
+    name = first.split(" ", 1)[1].strip() if " " in first else first
+    saved = _write_extract(
+        session_dir,
+        event.get("workspace") or "",
+        name,
+        content,
+        event.get("result_id"),
+    )
+    return {"content": _stub(name, saved, content)}
+
+
 BEFORE_HOOKS = [before_tool_deny_empty_path]
-# read 只按 offset 翻页，不再 after 切 8k（那会切掉续读提示）。
-# 函数留给 grep 等工具继续当输出封顶。
-AFTER_HOOKS: list = []
+# 普通文本只按 offset 翻页，不在这里再切 8000 字（那会切掉续读提示）。
+AFTER_HOOKS = [after_tool_offload_extract]
 
 
 async def execute(
@@ -91,8 +118,6 @@ async def execute(
         return _read_extracted(
             file_path,
             extractor,
-            workspace=root,
-            session_dir=session_dir,
             offset=offset,
             limit=limit,
         )
@@ -103,8 +128,6 @@ def _read_extracted(
     file_path: Path,
     extractor: Callable[[Path], str],
     *,
-    workspace: str,
-    session_dir: Optional[str],
     offset=None,
     limit=None,
 ) -> str:
@@ -115,14 +138,16 @@ def _read_extracted(
         )
     kind = file_path.suffix.lower().lstrip(".")
     full = f"[{kind}] {file_path.name}\n\n{body}"
-    if session_dir and len(full) > SPILL_CHARS:
-        saved = _write_extract(session_dir, workspace, file_path, full)
-        return _stub(file_path.name, saved, full)
-    return _paginate(full, offset=offset, limit=limit)
+    if len(full) <= SPILL_CHARS:
+        return _paginate(full, offset=offset, limit=limit)
+    return full
 
 
-def _write_extract(session_dir: str, workspace: str, file_path: Path, full: str) -> str:
-    key = hashlib.sha256(str(file_path.resolve()).encode("utf-8")).hexdigest()[:12]
+def _write_extract(
+    session_dir: str, workspace: str, name: str, full: str, result_id: Optional[str]
+) -> str:
+    raw = "".join(ch for ch in str(result_id or "") if ch.isalnum() or ch in "-_")
+    key = raw[:64] if raw else hashlib.sha256(full.encode("utf-8")).hexdigest()[:12]
     dest = Path(session_dir) / "workspace" / "tools_result" / "read" / f"{key}.txt"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(full, encoding="utf-8")

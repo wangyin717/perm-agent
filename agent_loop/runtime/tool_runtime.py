@@ -225,6 +225,9 @@ class ToolRuntime:
                 started.effective_args,
                 content,
                 is_error=is_error,
+                session_dir=self.session_dir,
+                workspace=self.workspace,
+                result_id=started.result_id,
             )
         except Exception as exc:
             logging.exception("[ToolRuntime] after_tool 失败 tool=%s", name)

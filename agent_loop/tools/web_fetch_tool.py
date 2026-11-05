@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import socket
-import uuid
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -81,8 +81,46 @@ def after_tool_truncate_output(event: Dict[str, Any]):
     return {"content": content[:AFTER_TRUNCATE_CHARS] + "\n...[output truncated]"}
 
 
+def after_tool_offload(event: Dict[str, Any]):
+    """页面已经抓完。全文还在 content 里。
+
+    有这次聊天的文件夹时，全文写到 tools_result/web_fetch/，模型只看大约 30 行、
+    2000 字。没有文件夹就留下全文。预览或全文仍超过 64000 字，再截掉尾巴。
+    """
+    content = event.get("content") or ""
+    session_dir = event.get("session_dir")
+    if (
+        session_dir
+        and not event.get("is_error")
+        and content.startswith("[web_fetch] ")
+        and "\nsaved:" not in content.split("\n\n", 1)[0]
+    ):
+        first, _, body = content.partition("\n\n")
+        url = first[len("[web_fetch] ") :].strip()
+        saved = _write_snapshot(
+            session_dir,
+            event.get("workspace"),
+            content,
+            event.get("result_id"),
+        )
+        content = _stub(url, saved, content if body else content)
+    clipped = after_tool_truncate_output({**event, "content": content})
+    if clipped is not None:
+        return clipped
+    if content != (event.get("content") or ""):
+        return {"content": content}
+    return None
+
+
+def _file_id(result_id: Optional[str], full: str) -> str:
+    raw = "".join(ch for ch in str(result_id or "") if ch.isalnum() or ch in "-_")
+    if raw:
+        return raw[:64]
+    return hashlib.sha256(full.encode("utf-8")).hexdigest()[:12]
+
+
 BEFORE_HOOKS = [before_tool_deny_empty_url]
-AFTER_HOOKS = [after_tool_truncate_output]
+AFTER_HOOKS = [after_tool_offload]
 
 
 class WebFetchError(ValueError):
@@ -101,16 +139,22 @@ async def execute(args: Dict[str, Any], sandbox=None, workspace=None, session_di
             "page has little text; it is probably JavaScript-rendered. "
             f"url={final_url}"
         )
-    full = f"[web_fetch] {final_url}\n\n{text}"
-    if not session_dir:
-        return full
-    saved = _write_snapshot(session_dir, workspace, final_url, full)
-    return _stub(final_url, saved, full)
+    return f"[web_fetch] {final_url}\n\n{text}"
 
 
-def _write_snapshot(session_dir: str, workspace: Optional[str], url: str, full: str) -> str:
-    short_id = uuid.uuid4().hex[:12]
-    dest = Path(session_dir) / "workspace" / "tools_result" / "web_fetch" / short_id
+def _write_snapshot(
+    session_dir: str,
+    workspace: Optional[str],
+    full: str,
+    result_id: Optional[str],
+) -> str:
+    dest = (
+        Path(session_dir)
+        / "workspace"
+        / "tools_result"
+        / "web_fetch"
+        / _file_id(result_id, full)
+    )
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(full, encoding="utf-8")
     root = Path(workspace or ".").resolve()

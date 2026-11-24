@@ -295,9 +295,13 @@ def _rg_search(
         "--color=never",
         "--no-heading",
         "--with-filename",
+        "--no-ignore",
     ]
     if glob:
         cmd.extend(["--glob", glob])
+    # `!name/**` misses a nested directory such as game_test/node_modules.
+    for name in sorted(SKIP_DIRS):
+        cmd.extend(["--glob", f"!**/{name}/**"])
     cmd.extend(["--", pattern, str(target)])
     try:
         proc = subprocess.run(

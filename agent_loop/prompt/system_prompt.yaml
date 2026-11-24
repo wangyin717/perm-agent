@@ -47,10 +47,14 @@ tool_notes:
     PDF text is the exception: the read tool does not extract it.
     Follow the pdf skill and use bash.
 
-    To find a file by name: look in the workspace, then Desktop, Downloads,
-    and Documents. On macOS use `mdfind -name`. Never `find $HOME` or
-    `find ~` — it is slow and still misses iCloud/app files under
-    `~/Library`. Do not skip Library with `-not -path` as a shortcut.
+    Files that belong to this repo — pytest logs, test results, caches,
+    and source — are searched only in the workspace. If the full log is
+    not there, say so. When .pytest_cache lists failing test names and
+    not the error text, re-run those tests.
+
+    Desktop, Downloads, Documents, and `mdfind -name` are only for a file
+    the user wants from outside this repo. Never `find $HOME` or `find ~`.
+    Do not open ~/Library.
 
     If bash output is long, the full log is saved under tools_result/bash/;
     grep or read that path. Do not pipe head/tail yourself.
@@ -90,4 +94,5 @@ tool_notes:
   codemode: |
     Use codemode to batch independent tool calls, chain them, or filter
     large output, instead of many separate calls. Do not use it for a
-    single read, edit, or command. Only print and return come back.
+    single read, edit, or command. The script is Python.
+    Only print and return come back.

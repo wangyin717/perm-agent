@@ -188,5 +188,26 @@
         }
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "codemode",
+      "description": "Use it to batch independent calls, chain them, or filter large output, instead of many separate calls. Do not use it for a single read, edit, or command. `code` is an async function body: await and return work. Call tools as `await tools.<name>(...)` with that tool's keyword arguments. Only print and return come back. No import, no open, no network. json, re, and math are already available. Do not import them. chr, ord, type, reversed, iter, next, divmod, pow, hex, bin, oct, ascii, and format are available. Do not call type() to inspect a value. Do not call codemode. The only tools are bash, read, write, edit, grep, web_search, web_fetch, and memory_search. There is no glob, ls, find, or list_files, and getattr is not allowed. Do not read a directory. List files with tools.bash(cmd=...) or with grep; a grep hit's path is the file. Each call is a new process, so names from an earlier codemode call are not defined. Finish in one script and print the full result, not a sample. Do not print one command just to see it. Failed calls raise. Each tools.* call returns one string, not an object. tools.read(path=, offset=, limit=) returns file text, at most 1000 lines. The footer is `[Showing lines start-end of total]`. The total line count is the number after of. If the page stops before the end, it adds `Use offset=N to continue.` A directory raises. tools.grep(pattern=, path=, glob=, cursor=) returns `path:line:content`, 20 matches per page. When more remain, the footer is `[Showing 20 of N matches. Continue with cursor=\"g1....\"]`. Pass that cursor back as cursor=. The match count is N in `[Showing 20 of N matches]`, or N in `[Showing N matches]`. Do not report 20 or 20+. When every match fits, the footer is `[Showing N matches]`, or `[Showing 1 match]`. No matches returns a line starting with `No matches for`. tools.bash(cmd=) returns the command output text. There is no .output field. For a line count, one call with limit=1 is enough. Do not page through the file or search the file text for Use offset. Count matches from the footer or later pages in the same script, not by reading the file into the script. wc -l on more than one file adds a last line whose path is total. That line is not a file. Drop it before counting or summing.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Async function body. await and return work. Call tools with keyword arguments."
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "description": "Optional timeout in milliseconds. Default 60000. Clamped to 1000..300000."
+          }
+        },
+        "required": ["code"]
+      }
+    }
   }
 ]

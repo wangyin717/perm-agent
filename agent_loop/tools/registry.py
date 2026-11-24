@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 from agent_loop.tools import (
     bash_tool,
+    codemode_tool,
     edit_tool,
     grep_tool,
     memory_search_tool,
@@ -24,6 +25,7 @@ TOOLS = {
     web_search_tool.NAME: web_search_tool,
     web_fetch_tool.NAME: web_fetch_tool,
     memory_search_tool.NAME: memory_search_tool,
+    codemode_tool.NAME: codemode_tool,
 }
 
 

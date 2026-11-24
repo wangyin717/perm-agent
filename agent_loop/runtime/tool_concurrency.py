@@ -3,9 +3,8 @@
 阶段一严格串行：逐个 before_tool + 写 tool_started。unknown/blocked 直接产出错误结果，
 不进入阶段二。
 
-阶段二：READ_ONLY=False 且有 lock_path 的调用按该 key 建 asyncio.Lock
-（文件工具用绝对路径；bash 共用 __bash__，彼此串行）。
-任何调用命中这些写路径就排队等锁，其余（不同路径的读写、web_*）直接并发。
+阶段二的写锁在 ToolRuntime 上，按 lock_path 取（bash 共用 __bash__）。
+READ_ONLY 不拿锁。codemode 里的写调用用同一把锁，避免和这批 bash/write 抢。
 asyncio.gather 一次等完，返回顺序 = 原始调用顺序。
 """
 
@@ -83,11 +82,12 @@ async def run_tool_calls(
 
     write_locks: Dict[str, asyncio.Lock] = {}
     for item in prepared:
-        if item.result is not None or not item.lock_path or item.tool is None:
+        # 已经有结果的调用不会执行。先跳过，测试里的替身 runtime 不必实现锁。
+        if item.result is not None:
             continue
-        if getattr(item.tool, "READ_ONLY", True):
-            continue
-        write_locks.setdefault(item.lock_path, asyncio.Lock())
+        lock = runtime.writer_lock(item)
+        if lock is not None and item.lock_path:
+            write_locks[item.lock_path] = lock
 
     async def _run_one(item: PreparedCall) -> ToolResultEntry:
         if item.result is not None:

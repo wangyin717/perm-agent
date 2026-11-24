@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -24,6 +26,16 @@ from agent_loop.cli.trace import log_tool_result, log_tool_start
 
 
 USER_DENIED = "The user denied this action."
+
+# 工具 execute 拿不到 runtime。codemode 在这里找到它，再去调内层工具。
+current_runtime: contextvars.ContextVar[Optional["ToolRuntime"]] = contextvars.ContextVar(
+    "current_runtime", default=None
+)
+# 内层调用仍返回 record 对象，但不进列表、不进 session log。
+# 崩溃恢复靠这两份记录认未关工单，内层不能留下。
+quiet_records: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "quiet_records", default=False
+)
 
 
 def is_user_denied(result: Optional[ToolResultEntry]) -> bool:
@@ -65,6 +77,7 @@ class ToolRuntime:
         self.plugin_host = None
         self.approver = None
         self._read_snaps: Dict[str, _ReadSnap] = {}
+        self._path_locks: Dict[str, asyncio.Lock] = {}
 
     def attach_log(self, log: Optional[SessionLog]) -> None:
         self._log = log
@@ -198,12 +211,16 @@ class ToolRuntime:
                     )
                 )
         try:
-            raw = await tool.execute(
-                started.effective_args,
-                sandbox,
-                workspace=self.workspace,
-                session_dir=self.session_dir,
-            )
+            runtime_token = current_runtime.set(self)
+            try:
+                raw = await tool.execute(
+                    started.effective_args,
+                    sandbox,
+                    workspace=self.workspace,
+                    session_dir=self.session_dir,
+                )
+            finally:
+                current_runtime.reset(runtime_token)
             media = None
             if isinstance(raw, ToolOutput):
                 content = raw.content
@@ -281,6 +298,8 @@ class ToolRuntime:
             effective_args=dict(effective_args),
             replay=replay if replay in ("safe", "never") else "never",
         )
+        if quiet_records.get():
+            return record
         self.tool_started_records.append(record)
         if self._log:
             self._log.append_record(
@@ -304,6 +323,8 @@ class ToolRuntime:
         成功路径必须沿用 started.result_id；失败路径（未知工具/block）自己生成新 id，
         因为那些路径压根没有对应的 started 记录。
         """
+        if quiet_records.get():
+            return entry
         self.tool_result_records.append(entry)
         if self._log:
             payload = dict(
@@ -387,6 +408,23 @@ class ToolRuntime:
             content=data.decode("utf-8", errors="replace"),
             mtime_ns=path.stat().st_mtime_ns,
         )
+
+
+    def path_lock(self, key: str) -> asyncio.Lock:
+        """同一把锁给 run_tool_calls 和 codemode 的内层调用共用。"""
+        lock = self._path_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._path_locks[key] = lock
+        return lock
+
+    def writer_lock(self, prepared: PreparedCall) -> Optional[asyncio.Lock]:
+        """READ_ONLY 不拿锁，可以一起跑。写工具和 bash 按 lock_path 串行。"""
+        if prepared.result is not None or not prepared.lock_path or prepared.tool is None:
+            return None
+        if getattr(prepared.tool, "READ_ONLY", True):
+            return None
+        return self.path_lock(prepared.lock_path)
 
 
 def _tool_replay(tool) -> str:

@@ -24,6 +24,7 @@ _DISPLAY_NAMES = {
     "web_search": "WebSearch",
     "web_fetch": "WebFetch",
     "memory_search": "MemorySearch",
+    "codemode": "CodeMode",
 }
 
 

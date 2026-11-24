@@ -117,4 +117,8 @@ def describe_call(name: str, args: Optional[Dict[str, Any]]) -> str:
         lines = str(args.get("code") or "").strip().splitlines()
         first = " ".join(lines[0].split())[:60] if lines else ""
         return f"browser_exec  {first}".rstrip()
+    if name == "codemode":
+        lines = str(args.get("code") or "").strip().splitlines()
+        first = " ".join(lines[0].split())[:60] if lines else ""
+        return f"codemode  {first}".rstrip()
     return name

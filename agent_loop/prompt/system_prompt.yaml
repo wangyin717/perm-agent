@@ -87,3 +87,7 @@ tool_notes:
   write: |
     Overwriting an existing file requires a prior read of that path.
     Creating a new file does not.
+  codemode: |
+    Use codemode to batch independent tool calls, chain them, or filter
+    large output, instead of many separate calls. Do not use it for a
+    single read, edit, or command. Only print and return come back.
